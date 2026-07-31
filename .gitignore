@@ -1,3 +1,6 @@
-/Manifest*.toml
-/docs/Manifest*.toml
+# Manifests are not committed anywhere, including the test sub-environments under test/. Pinning
+# those would mask upstream breakage in fast-moving backends (Reactant, CUDA) that CI is meant to
+# catch, and `run_subenv` in test/runtests.jl instantiates them on demand.
+Manifest*.toml
+
 /docs/build/

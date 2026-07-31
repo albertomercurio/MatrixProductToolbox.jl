@@ -27,7 +27,7 @@ Grow an overlap environment to the right by one site.
 Contracts
 
 ```math
-L'[b', a'] = \sum_{b, s, a} L[b, a] \, \overline{B[b, s, b']} \, A[a, s, a']
+L'[b', a'] = \sum_{b, s, a} L[b, a] \, B[b, s, b']^* \, A[a, s, a']
 ```
 
 so `A` is the ket tensor and `B` the bra tensor (the conjugated one).
@@ -54,7 +54,7 @@ Grow an operator environment to the right by one site.
 Contracts
 
 ```math
-L'[b', w', a'] = \sum_{b, w, a, s, s'} L[b, w, a] \, \overline{B[b, s', b']} \,
+L'[b', w', a'] = \sum_{b, w, a, s, s'} L[b, w, a] \, B[b, s', b']^* \,
                  W[w, s', s, w'] \, A[a, s, a']
 ```
 
@@ -88,7 +88,7 @@ Grow an overlap environment to the left by one site.
 Contracts
 
 ```math
-R'[b, a] = \sum_{b', s, a'} \overline{B[b, s, b']} \, R[b', a'] \, A[a, s, a']
+R'[b, a] = \sum_{b', s, a'} B[b, s, b']^* \, R[b', a'] \, A[a, s, a']
 ```
 
 # Arguments
@@ -113,7 +113,7 @@ Grow an operator environment to the left by one site.
 Contracts
 
 ```math
-R'[b, w, a] = \sum_{b', w', a', s, s'} \overline{B[b, s', b']} \, W[w, s', s, w'] \,
+R'[b, w, a] = \sum_{b', w', a', s, s'} B[b, s', b']^* \, W[w, s', s, w'] \,
               A[a, s, a'] \, R[b', w', a']
 ```
 

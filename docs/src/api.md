@@ -59,7 +59,6 @@ AbstractTruncation
 NoTruncation
 Truncation
 FixedTruncation
-TruncationInfo
 ```
 
 ### Factorizations

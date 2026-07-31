@@ -86,41 +86,56 @@ never rewriting a check.
 const BACKEND_SITES = 5
 const BACKEND_CHI = 4
 
-const BACKEND_PROBES = [
+# Split in two, because the two halves stress different parts of a backend: the first needs only
+# `@tensor` contractions, the second additionally needs `LinearAlgebra.svd`. A backend can support
+# one and not the other — Reactant's complex SVD currently being the case in point — so keeping
+# them separate lets a backend report honestly instead of all-or-nothing.
+const CONTRACTION_PROBES = [
     "dot" => (H, ψ, φ) -> dot(ψ, φ),
     "self-overlap" => (H, ψ, φ) -> dot(ψ, ψ),
     "expect" => (H, ψ, φ) -> expect(H, ψ),
     "apply then overlap" => (H, ψ, φ) -> dot(φ, apply(H, ψ)),
     "scalar multiply" => (H, ψ, φ) -> dot(2 * ψ, ψ),
+]
+
+const GAUGE_PROBES = [
     "canonicalize" => (H, ψ, φ) -> expect(H, canonicalize(ψ, BACKEND_SITES)),
     "canonicalize mid-chain" => (H, ψ, φ) -> expect(H, canonicalize(ψ, 3)),
     "fixed truncation" =>
         (H, ψ, φ) -> expect(H, canonicalize(ψ, BACKEND_SITES; trunc = FixedTruncation(2))),
 ]
 
+const BACKEND_PROBES = vcat(CONTRACTION_PROBES, GAUGE_PROBES)
+
 # The reference inputs, on the CPU. A backend adapts these and compares against the values the
-# probes produce here.
-function backend_inputs()
+# probes produce here. `T` is a parameter because a backend may support one element type and not
+# another.
+function backend_inputs(::Type{T} = ComplexF64) where {T <: Number}
     L = BACKEND_SITES
-    ψ = rand_mps(ComplexF64, fill(2, L); maxdim = BACKEND_CHI, rng = MersenneTwister(14))
-    φ = rand_mps(ComplexF64, fill(2, L); maxdim = BACKEND_CHI, rng = MersenneTwister(15))
-    return tfim_mpo(ComplexF64, L), ψ, φ
+    ψ = rand_mps(T, fill(2, L); maxdim = BACKEND_CHI, rng = MersenneTwister(14))
+    φ = rand_mps(T, fill(2, L); maxdim = BACKEND_CHI, rng = MersenneTwister(15))
+    return tfim_mpo(T, L), ψ, φ
 end
 
 @doc raw"""
-    backend_testset(name, adaptor, run)
+    backend_testset(name, adaptor, run; probes = BACKEND_PROBES, T = ComplexF64)
 
-Run every probe in `BACKEND_PROBES` on one array backend and compare against the CPU answer.
+Run a probe list on one array backend and compare against the CPU answer.
 
 # Arguments
 - `name`: label for the testset.
 - `adaptor`: moves a matrix-product object to the backend, e.g. `ψ -> adapt(CuArray, ψ)`.
 - `run`: invokes a three-argument probe and returns a host `Number`. Eager backends pass
   `(f, a, b, c) -> f(a, b, c)`; Reactant wraps the call in `@jit`.
+- `probes`: which list to run — `CONTRACTION_PROBES` for a backend whose `svd` is unusable.
+- `T`: element type of the reference inputs.
 """
-function backend_testset(name::AbstractString, adaptor, run)
+function backend_testset(
+        name::AbstractString, adaptor, run;
+        probes = BACKEND_PROBES, T::Type = ComplexF64
+    )
     return @testset "$name" begin
-        H_cpu, ψ_cpu, φ_cpu = backend_inputs()
+        H_cpu, ψ_cpu, φ_cpu = backend_inputs(T)
         H, ψ, φ = adaptor(H_cpu), adaptor(ψ_cpu), adaptor(φ_cpu)
 
         # Structural metadata must survive the move: it is host-side data, not array data.
@@ -130,7 +145,7 @@ function backend_testset(name::AbstractString, adaptor, run)
         @test bond_dims(ψ) == bond_dims(ψ_cpu)
         @test physical_dims(ψ) == physical_dims(ψ_cpu)
 
-        for (label, probe) in BACKEND_PROBES
+        for (label, probe) in probes
             @testset "$label" begin
                 @test run(probe, H, ψ, φ) ≈ probe(H_cpu, ψ_cpu, φ_cpu)
             end

@@ -45,46 +45,44 @@ end
 end
 
 @testset "truncation policies" begin
-    M = diagm([1.0, 0.1, 0.01, 0.001])
-    total = sum(abs2, [1.0, 0.1, 0.01, 0.001])
+    σ = [1.0, 0.1, 0.01, 0.001]
+    M = diagm(σ)
+    # The kept rank is read off the returned shapes, which is the only thing that matters:
+    # `size(Q, 2)` *is* the new bond dimension.
+    kept(trunc) = size(first(factorize_left(SVDFactorization(), trunc, M)), 2)
 
-    # NoTruncation keeps the full rank and reports no error.
-    _, _, info = factorize_left(SVDFactorization(), NoTruncation(), M)
-    @test info.dim == 4
-    @test info.error == 0
+    # NoTruncation keeps the full rank.
+    @test kept(NoTruncation()) == 4
 
     # FixedTruncation keeps min(maxdim, m, n) -- decided by shape alone.
     for k in 1:4
-        Q, R, info = factorize_left(SVDFactorization(), FixedTruncation(k), M)
-        @test info.dim == k
+        Q, R = factorize_left(SVDFactorization(), FixedTruncation(k), M)
         @test size(Q) == (4, k)
         @test Q' * Q ≈ I                                   # exact isometry, no padding
-        @test info.error ≈ sum(abs2, [1.0, 0.1, 0.01, 0.001][(k + 1):end]) / total
+        # Exactly the leading k singular values survive.
+        @test sort(svdvals(Q * R); rev = true)[1:k] ≈ σ[1:k]
     end
     # Asking for more than the shape allows is clamped, not padded with zero columns.
-    _, _, info = factorize_left(SVDFactorization(), FixedTruncation(10), M)
-    @test info.dim == 4
+    @test kept(FixedTruncation(10)) == 4
 
     # The documented promise: because the rank is capped at min(m, n) rather than padded up to
     # `maxdim`, the isometry stays exact even when the bond matrix is rank-deficient. Padding
     # would have produced zero columns and only a projector.
     rank_deficient = [1.0 0.0; 0.0 0.0; 0.0 0.0; 0.0 0.0]     # 4×2, rank 1
-    Q, R, info = factorize_left(SVDFactorization(), FixedTruncation(4), rank_deficient)
-    @test info.dim == 2
+    Q, R = factorize_left(SVDFactorization(), FixedTruncation(4), rank_deficient)
     @test size(Q) == (4, 2)
     @test Q' * Q ≈ I
     @test Q * R ≈ rank_deficient
 
-    # Cutoff keeps the smallest k whose discarded weight fits the tolerance.
-    _, _, info = factorize_left(SVDFactorization(), Truncation(; cutoff = 1.0e-3), M)
-    @test info.dim == 2
-    @test info.error ≤ 1.0e-3
+    # Cutoff keeps the smallest k whose discarded weight fits the tolerance: dropping σ₃ and σ₄
+    # costs (0.01² + 0.001²)/Σσ² ≈ 1e-4 ≤ 1e-3, whereas also dropping σ₂ would cost ≈ 1e-2.
+    @test kept(Truncation(; cutoff = 1.0e-3)) == 2
+    @test kept(Truncation(; cutoff = 1.0e-6)) == 3
     # maxdim wins when it is the tighter constraint.
-    _, _, info = factorize_left(SVDFactorization(), Truncation(; maxdim = 1, cutoff = 1.0e-3), M)
-    @test info.dim == 1
+    @test kept(Truncation(; maxdim = 1, cutoff = 1.0e-3)) == 1
 
     # factorize_right mirrors it, with orthonormal rows instead of columns.
-    Lf, Q, info = factorize_right(SVDFactorization(), FixedTruncation(2), M)
+    Lf, Q = factorize_right(SVDFactorization(), FixedTruncation(2), M)
     @test size(Lf) == (4, 2) && size(Q) == (2, 4)
     @test Q * Q' ≈ I
     F = svd(M)

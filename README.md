@@ -43,8 +43,8 @@ in the documentation.
 ## GPU and XLA
 
 ```julia
-using Adapt, CUDA
-ψ_gpu = adapt(CuArray, ψ)         # everything else is unchanged
+using Adapt, CUDA, cuTENSOR      # cuTENSOR is required, not optional -- see below
+ψ_gpu = adapt(CuArray, ψ)        # everything else is unchanged
 
 using Reactant
 ψ_xla = Reactant.to_rarray(ψ)
@@ -52,9 +52,36 @@ sweep(H, ψ) = expect(H, canonicalize(ψ, length(ψ); trunc = FixedTruncation(8)
 compiled = @compile sweep(H_xla, ψ_xla)
 ```
 
-Two notes on the XLA path: compile *one whole sweep* rather than individual contractions, since
-fusion is the point; and use `FixedTruncation`, whose bond dimensions follow from the chain
-geometry rather than from singular-value magnitudes, because XLA needs shapes at trace time. See
+Use `FixedTruncation` under Reactant: its bond dimensions follow from the chain geometry rather
+than from singular-value magnitudes, and XLA needs shapes at trace time.
+
+### Measured status (RTX 4090, CUDA 13.0 — see `benchmarks/`)
+
+**Contractions are worth accelerating at large bond dimension**, and XLA fusion is real:
+
+| | `L` | `χ` | CPU | GPU | speedup |
+|:---|---:|---:|---:|---:|---:|
+| CUDA + cuTENSOR | 60 | 128 | 104 ms | 14.9 ms | **6.96×** |
+| Reactant (XLA) | 60 | 64 | 12.1 ms | 4.4 ms | **2.72×** |
+| Reactant (XLA) | 60 | 128 | 59.5 ms | 11.7 ms | **5.08×** |
+
+It is all a function of `χ`: below about 32 neither accelerator beats BLAS (XLA is 0.56× at
+`χ = 16`), so don't draw conclusions from toy sizes.
+
+**Gauge sweeps are not** — the SVD is a chain of small sequential factorizations, close to the
+worst case for a GPU, and runs 5–50× *slower* there on both backends. That is the strongest
+argument for adding a `QRFactorization`.
+
+Two caveats worth knowing before you start:
+
+- **`using cuTENSOR` is mandatory.** TensorOperations' GPU contraction backend lives in its
+  cuTENSOR extension; with `CUDA` alone, `@tensor` silently picks the Strided *CPU* path and every
+  contraction fails on `Scalar indexing is disallowed`.
+- **Reactant's complex `svd` is broken upstream** (wrong `Vt` conjugation on GPU, an LLVM
+  signature mismatch on CPU), so `canonicalize`/`truncate` under Reactant currently work only in
+  `Float64`. Contractions are unaffected in both element types.
+
+Details and the full tables in
 [Array backends](https://albertomercurio.github.io/MatrixProductToolbox.jl/dev/manual/backends/).
 
 ## Status

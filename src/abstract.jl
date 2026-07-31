@@ -10,26 +10,11 @@ export nphysical, physical_dims, bond_dims, maxbonddim
 @doc raw"""
     abstract type AbstractMatrixProduct{N}
 
-Supertype for one-dimensional matrix-product objects, where `N` is the number of physical
-legs carried by every site.
+Supertype for one-dimensional matrix-product objects, where `N` is the number of physical legs per
+site: `N = 1` is an [`MPS`](@ref), `N = 2` an [`MPO`](@ref).
 
-A matrix-product object is a chain of `L` site tensors, each with the index order
-
-```
-A[l, p₁, …, p_N, r]
-```
-
-where `l` is the left bond, `p₁ … p_N` are the physical legs and `r` is the right bond.
-Boundary bonds have dimension `1` rather than being omitted, so every site tensor has
-exactly `N + 2` indices and all generic code is shape-agnostic.
-
-`N = 1` is a matrix-product state ([`MPS`](@ref)) and `N = 2` is a matrix-product operator
-([`MPO`](@ref)). Larger `N` is allowed but has no dedicated support.
-
-# Notes
-- This is a strictly one-dimensional container: every site has exactly one left and one
-  right bond. Generic tensor networks with arbitrary connectivity are out of scope.
-- `N` varies the number of physical legs per site, never the connectivity.
+Site tensors are indexed `A[l, p₁, …, p_N, r]`, with boundary bonds of dimension `1` rather than
+omitted. See [Matrix products](@ref man-matrix-products) for the conventions.
 
 # Interface
 
@@ -38,12 +23,11 @@ A concrete subtype `T <: AbstractMatrixProduct{N}` must implement
 - `Base.length(::T)`: the number of sites.
 - `Base.getindex(::T, i::Integer)`: the site tensor at site `i`.
 - [`center`](@ref)`(::T)`: the orthogonality centre as a `UnitRange{Int}`.
-- `MatrixProductToolbox.setsite!(::T, i::Integer, t)`: replace a site tensor *without*
-  touching the gauge label.
+- `MatrixProductToolbox.setsite!(::T, i::Integer, t)`: replace a site tensor *without* touching
+  the gauge label.
 - `MatrixProductToolbox.setcenter!(::T, r::UnitRange{Int})`: set the gauge label.
 
-Everything else ([`physical_dims`](@ref), [`bond_dims`](@ref), [`canonicalize!`](@ref),
-[`expect`](@ref), …) is generic and follows from these five.
+Everything else is generic and follows from those five.
 """
 abstract type AbstractMatrixProduct{N} end
 
@@ -57,12 +41,6 @@ Number of physical legs carried by every site.
 
 # Returns
 - `N::Int`: `1` for an [`MPS`](@ref), `2` for an [`MPO`](@ref).
-
-# Examples
-```jldoctest
-julia> nphysical(product_mps([2, 2, 2], [1, 1, 1]))
-1
-```
 """
 nphysical(::AbstractMatrixProduct{N}) where {N} = N
 nphysical(::Type{<:AbstractMatrixProduct{N}}) where {N} = N
