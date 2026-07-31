@@ -13,10 +13,10 @@ norms cheap, truncation optimal, and (later) DMRG stable.
 This package tracks the gauge with a single field, [`center`](@ref), which is **the range of
 sites not known to be orthogonal**:
 
-- sites `1:first(center)-1` are left-orthogonal, ``\sum_{l,p} \overline{A[l,p,r']} A[l,p,r] =
+- sites `1:first(center)-1` are left-orthogonal, ``\sum_{l,p} A[l,p,r']^* A[l,p,r] =
   \delta_{r'r}``;
 - sites `last(center)+1:end` are right-orthogonal, ``\sum_{p,r} A[l,p,r]
-  \overline{A[l',p,r]} = \delta_{ll'}``.
+  A[l',p,r]^* = \delta_{ll'}``.
 
 | Value | Meaning |
 |:---|:---|
@@ -132,16 +132,17 @@ worth knowing when moving code between backends.
 
 ## Inspecting a factorization
 
-The factorization layer is available directly, and reports what it discarded:
+The factorization layer is available directly. It returns just the two factors — the kept bond
+dimension is `size(Q, 2)`, so there is nothing extra to carry around:
 
 ```@example gauge
 M = diagm([1.0, 0.1, 0.01, 0.001])
-Q, R, info = factorize_left(SVDFactorization(), Truncation(; cutoff = 1e-3), M)
-info
+Q, R = factorize_left(SVDFactorization(), Truncation(; cutoff = 1e-3), M)
+size(Q, 2)      # two singular values were enough to meet the cutoff
 ```
 
 ```@example gauge
-size(Q), Q' * Q ≈ I, Q * R ≈ M
+Q' * Q ≈ I, Q * R ≈ M
 ```
 
 [`factorize_left`](@ref) produces orthonormal *columns* for left-to-right sweeps;

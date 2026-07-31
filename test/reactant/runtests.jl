@@ -39,17 +39,35 @@ jit_run(f, a, b, c) = _host(@jit f(a, b, c))
 @testset "Reactant / XLA" verbose = true begin
     Reactant.set_default_backend("cpu")
 
-    @testset "shared backend probes" begin
-        # The same list the CPU and CUDA groups run; only the adaptor and the runner differ.
-        backend_testset("ConcreteRArray", Reactant.to_rarray, jit_run)
+    # The same probe lists the CPU and CUDA groups run; only the adaptor and the runner differ.
+    # They are split by element type on purpose — see the note below.
+    @testset "contractions (ComplexF64)" begin
+        backend_testset(
+            "ConcreteRArray", Reactant.to_rarray, jit_run;
+            probes = CONTRACTION_PROBES, T = ComplexF64
+        )
     end
 
-    H_cpu, ψ_cpu, _ = backend_inputs()
+    # Reactant's *complex* SVD on the CPU backend is currently broken: measured against the CPU
+    # answer it is silently wrong at small bond dimensions (relative error ~0.26 at L = 10, χ = 4)
+    # and segfaults from χ ≈ 6 upwards. The real SVD is exact. So the gauge probes — the only ones
+    # that call `svd` — run in Float64, where they genuinely verify this package's canonicalization
+    # under XLA rather than passing by luck at one small size.
+    @testset "gauge and truncation (Float64)" begin
+        backend_testset(
+            "ConcreteRArray", Reactant.to_rarray, jit_run;
+            probes = GAUGE_PROBES, T = Float64
+        )
+    end
+
+    # Float64 throughout below, since everything here goes through `svd`.
+    H_cpu, ψ_cpu, _ = backend_inputs(Float64)
     H, ψ = Reactant.to_rarray(H_cpu), Reactant.to_rarray(ψ_cpu)
 
     @testset "compile once, run many" begin
-        # Compiling one whole sweep is the point: fusing many small contractions into single XLA
-        # kernels is what makes this worthwhile, so compiling per-contraction would be worse.
+        # Compile one whole sweep rather than individual contractions. Note this is about
+        # *correctness of the workflow*, not speed: on the CPU backend XLA measures at roughly
+        # parity with plain Julia for this workload (see benchmarks/reactant.jl).
         sweep(H, ψ) = expect(H, canonicalize(ψ, BACKEND_SITES; trunc = FixedTruncation(2)))
 
         compiled = @compile sweep(H, ψ)

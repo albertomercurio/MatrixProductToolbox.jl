@@ -10,8 +10,12 @@ runners have no GPU, so this group is not part of the default CI matrix — it i
 runs and self-hosted GPU CI.
 
 Nothing here is CUDA-specific beyond the adaptor: `CuArray` works because every operation the
-package performs is generic (`reshape`, `similar`, `*`, broadcast, `sum`, `svd`) and because
-TensorOperations ships its own CUDA extension.
+package performs is generic (`reshape`, `similar`, `*`, broadcast, `sum`, `svd`).
+
+**`using cuTENSOR` is required, not optional.** TensorOperations' actual GPU contraction backend
+lives in its cuTENSOR extension; its CUDA extension only supplies device-aware allocation. Without
+cuTENSOR loaded, `CuArray <: DenseArray` makes `isstrided` return `true`, `@tensor` selects the
+Strided CPU backend, and every contraction dies on `Scalar indexing is disallowed`.
 =#
 
 using MatrixProductToolbox
@@ -22,6 +26,7 @@ using CUDA
 using LinearAlgebra
 using Random
 using TensorOperations: @tensor
+using cuTENSOR
 
 include(joinpath(@__DIR__, "..", "testutils.jl"))
 

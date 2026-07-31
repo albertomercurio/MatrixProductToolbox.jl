@@ -170,12 +170,20 @@ policy cannot be traced.
 Every backend works because the package only ever uses generic operations (`reshape`,
 `similar`, `*`, broadcast, `sum`, `svd`) plus `@tensor`, and the ecosystem supplies the rest:
 
-- **CUDA**: TensorOperations ships `TensorOperationsCUDACoreExt` and a cuTENSOR backend.
+- **CUDA**: TensorOperations' GPU contraction backend is in its **cuTENSOR** extension, so users
+  must load `CUDA` *and* `cuTENSOR`. Its CUDA extension alone only provides device-aware
+  allocation; without cuTENSOR, `CuArray <: DenseArray` makes `isstrided` true, `@tensor` picks the
+  Strided CPU backend, and everything fails on `Scalar indexing is disallowed`. Note the version
+  coupling: TensorOperations 5.6 needs cuTENSOR **v6**, not v2.
 - **Reactant/XLA**: Reactant ships `ReactantTensorOperationsExt` (PR #2944, 2026-06-09;
   Reactant ≥ 0.2.275, `TensorOperations = "5.6"`). It routes to TensorOperations' `BaseCopy`
   backend — `permutedims` into temporaries, `reshape`, `mul!` — rather than to
-  `Ops.dot_general`. XLA's simplifier should fold the transposes into the dots. **If XLA
-  performance disappoints, the fix belongs upstream in Reactant, not here.**
+  `Ops.dot_general`. This was measured head to head (`benchmarks/dot_general.jl`): **runtime is a
+  wash** — XLA's simplifier really does fold the transposes into the dots — but going through
+  `BaseCopy` emits twice the HLO transposes and compiles **~6× slower** (13.0 s vs 2.2 s). That is
+  irrelevant for one-off runs and will matter for DMRG, which compiles per shape signature. **The
+  fix belongs upstream in Reactant's extension, not here**; do not add a `dot_general` path to this
+  package, since it would mean a Reactant dependency for no runtime gain.
 
 `Adapt.adapt_structure` is the single method that makes objects portable; it gives `cu(ψ)` and
 `Reactant.to_rarray(ψ)` for free.
@@ -188,7 +196,12 @@ one factorization available on every backend — Reactant has **no `qr`** (only 
 forced a `default_factorization` hook so Reactant users could opt out; dropping it means zero
 hooks.
 
-**QR is the first planned optimization** (~2–3× on untruncated gauge sweeps). The
+**QR is the first planned optimization, and the GPU numbers make it urgent.** A gauge sweep runs
+5–50× *slower* on a GPU than on the CPU (`benchmarks/cuda.jl`, RTX 4090) because it is a chain of
+small sequential SVDs — while the contractions in the same sweep run up to 7× *faster*. Note also
+that accelerator wins only appear for `χ ≳ 64`; benchmarking at `χ ≤ 32` shows XLA *losing*, so
+size the benchmark before concluding anything. A QR is far
+more GPU-friendly, and batching factorizations across bonds is the other half of the fix. The
 `AbstractFactorization` abstract type plus the `factorization` keyword make it purely additive.
 When adding it, note: use `lmul!(F.Q, E)` with a device-built identity rather than
 `Matrix(F.Q)` (which would move a `CuArray` to the host), and implement `factorize_right` as
@@ -216,10 +229,15 @@ When adding it, note: use `lmul!(F.Q, E)` with a device-built identity rather th
 Both were found by running `GROUP=Reactant`, and both are invisible on the CPU:
 
 - **A traced number is `<: Number` but *not* `<: Real`.** Never constrain a type parameter or an
-  argument to `Real` on anything that can hold a computed scalar — it makes the method
-  unconstructible under tracing. `TruncationInfo{T <: Number}` is bounded this way on purpose, and
-  the docstring says so. The same goes for `eltype`: `eltype(TracedRArray{Float64,2})` is
-  `TracedRNumber{Float64}`, not `Float64`.
+  argument to `Real` on anything that can hold a *computed* scalar — it makes the method
+  uncallable under tracing. (A `Real` bound on a policy *field* like `Truncation.cutoff` is fine:
+  that is always a host value.) The same goes for `eltype`:
+  `eltype(TracedRArray{Float64,2})` is `TracedRNumber{Float64}`, not `Float64`.
+- **Build tensors outside the compiled region and pass them in.** An array constructed *inside* a
+  traced function comes out as `Array{TracedRNumber{T},N}` — an array of traced scalars — not a
+  `TracedRArray{T,N}`, and TensorOperations rejects the mix with `incompatible types for
+  tensorcontract!`. So `Reactant.to_rarray(H)` on the outside, never `identity_mpo(...)` on the
+  inside.
 - **Never branch on a value, only on a shape.** `if total > 0` compiles to a traced boolean and
   cannot drive Julia control flow. `if k ≥ length(s)` is fine, because `k` and `length(s)` come
   from shapes. `_discarded_weight` is written this way deliberately; the comment there explains
@@ -236,6 +254,17 @@ Both were found by running `GROUP=Reactant`, and both are invisible on the CPU:
 - **Argument order is operator-first**: `expect(H, ψ)`, `apply(H, ψ)`, `H * ψ`. Matches
   QuTiP/QuantumToolbox. `dot(ψ, φ)` keeps LinearAlgebra's order, since it conjugates its first
   argument.
+- **Complex conjugation is written `X^*`**, not with an overline, in both LaTeX and prose. The
+  adjoint is `†`.
+- **Keep docstrings short.** Signature, one-or-two-line summary, `# Arguments`, `# Returns`. Tables,
+  derivations and long rationale belong in `docs/src/manual/`, not in a docstring — the docstring
+  should link there instead. Abstract types get no `# Examples`: an example of an abstract type is
+  necessarily an example of some concrete subtype, so it belongs on that subtype.
+- **No speculative return values.** `factorize_left`/`factorize_right` return just `(Q, R)` /
+  `(L, Q)`; the kept bond dimension is `size(Q, 2)`. An earlier version returned a
+  `TruncationInfo` carrying the discarded weight, which nothing consumed while costing a reduction
+  on every bond of every sweep. Per-sweep truncation-error reporting belongs with DMRG, which is
+  the first thing that actually needs it.
 - **Expectation values are unnormalised**: `expect` returns `⟨ψ|Ô|ψ⟩` with no division by
   `⟨ψ|ψ⟩`. Documented, and tested.
 - **Mutation-first with copying wrappers**: `canonicalize!` is the primary implementation;

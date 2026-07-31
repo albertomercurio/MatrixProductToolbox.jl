@@ -17,7 +17,7 @@ function _orthogonalize_left!(
     t = ψ[i]
     χl = size(t, 1)
     dims = _physsize(t, Val(N))
-    Q, R, _ = factorize_left(alg, trunc, reshape(t, :, size(t, N + 2)))
+    Q, R = factorize_left(alg, trunc, reshape(t, :, size(t, N + 2)))
     setsite!(ψ, i, reshape(Q, χl, dims..., size(Q, 2)))
     setsite!(ψ, i + 1, _absorb_left(R, ψ[i + 1]))
     return ψ
@@ -31,7 +31,7 @@ function _orthogonalize_right!(
     t = ψ[i]
     χr = size(t, N + 2)
     dims = _physsize(t, Val(N))
-    L, Q, _ = factorize_right(alg, trunc, reshape(t, size(t, 1), :))
+    L, Q = factorize_right(alg, trunc, reshape(t, size(t, 1), :))
     setsite!(ψ, i, reshape(Q, size(Q, 1), dims..., χr))
     setsite!(ψ, i - 1, _absorb_right(ψ[i - 1], L))
     return ψ
