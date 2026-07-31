@@ -187,7 +187,7 @@ end
 
 Base.length(ψ::MatrixProduct) = length(ψ.tensors)
 Base.getindex(ψ::MatrixProduct, i::Integer) = ψ.tensors[i]
-Base.firstindex(::MatrixProduct) = firstindex(ψ.tensors)
+Base.firstindex(ψ::MatrixProduct) = firstindex(ψ.tensors)
 Base.lastindex(ψ::MatrixProduct) = lastindex(ψ.tensors)
 Base.eachindex(ψ::MatrixProduct) = eachindex(ψ.tensors)
 
