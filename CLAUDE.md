@@ -89,7 +89,7 @@ Ten source files, each mapping to one concept.
 | `src/abstract.jl` | `AbstractMatrixProduct{N}`, the five-method subtype interface, generic queries |
 | `src/matrixproduct.jl` | the container, `MPS`/`MPO` aliases, `Base` and `Adapt` methods |
 | `src/kernels.jl` | **the entire compute core** — six contractions |
-| `src/factorizations.jl` | truncation policies and the SVD factorization |
+| `src/factorizations.jl` | truncation policies and the SVD / QR factorizations |
 | `src/canonical.jl` | `canonicalize!`, `truncate!` |
 | `src/states.jl` | `rand_mps`, `product_mps`, `product_mpo`, `identity_mpo` |
 | `src/observables.jl` | `dot`, `norm`, `expect`, entanglement |
@@ -188,25 +188,57 @@ Every backend works because the package only ever uses generic operations (`resh
 `Adapt.adapt_structure` is the single method that makes objects portable; it gives `cu(ψ)` and
 `Reactant.to_rarray(ψ)` for free.
 
-### Why SVD only
+### Two factorizations, split on truncation
 
-`SVDFactorization` is the only factorization. SVD is needed for truncation anyway, and it is the
-one factorization available on every backend — Reactant has **no `qr`** (only an unwired
-`enzymexla.linalg.qr` MLIR op with LAPACK symbols unregistered on CPU). Adding QR would have
-forced a `default_factorization` hook so Reactant users could opt out; dropping it means zero
-hooks.
+`SVDFactorization` is the default and the only one that can discard anything.
+`QRFactorization` is for exact gauge sweeps and is measured at 2.0× (χ=16) to 3.0× (χ=128)
+faster on a 20-site chain. Neither needs a hook: the `factorization` keyword carries the
+choice, and both work on every backend.
 
-**QR is the first planned optimization, and the GPU numbers make it urgent.** A gauge sweep runs
-5–50× *slower* on a GPU than on the CPU (`benchmarks/cuda.jl`, RTX 4090) because it is a chain of
-small sequential SVDs — while the contractions in the same sweep run up to 7× *faster*. Note also
-that accelerator wins only appear for `χ ≳ 64`; benchmarking at `χ ≤ 32` shows XLA *losing*, so
-size the benchmark before concluding anything. A QR is far
-more GPU-friendly, and batching factorizations across bonds is the other half of the fix. The
-`AbstractFactorization` abstract type plus the `factorization` keyword make it purely additive.
-When adding it, note: use `lmul!(F.Q, E)` with a device-built identity rather than
-`Matrix(F.Q)` (which would move a `CuArray` to the host), and implement `factorize_right` as
-`qr` of the adjoint rather than `lq`, because CUDA's `lq` coverage is unreliable.
-`CholeskyQRFactorization` is also viable on backends with `cholesky` but no `qr`.
+**The GPU numbers are why this exists.** A gauge sweep runs 5–50× *slower* on a GPU than on the
+CPU (`benchmarks/cuda.jl`, RTX 4090) because it is a chain of small sequential SVDs — while the
+contractions in the same sweep run up to 7× *faster*. A QR is far more GPU-friendly; batching
+factorizations across bonds is the other half of the fix and is still to do. Note also that
+accelerator wins only appear for `χ ≳ 64`; benchmarking at `χ ≤ 32` shows XLA *losing*, so size
+the benchmark before concluding anything.
+
+**Under Reactant the QR is not merely faster — it is the only one that works in `ComplexF64`.**
+Reactant's complex SVD is silently wrong at `χ = 4` and segfaults from about `χ = 6`; the QR is a
+different lowering (`geqrf` + `ungqr`, never `gesdd`) and is exact there — measured at `6e-16`
+(`L = 10`, `χ = 4`) and `1e-15` (`χ = 8`) against the CPU. `truncate!` still cannot run complex
+under Reactant at all, since only the SVD can discard anything.
+
+Whether a factorization may be handed a truncating policy is
+`_supports_truncation(alg)` — internal, defaulting to `true`. `truncate!` consults it **before
+the first sweep**, because only its middle sweep truncates; a late check would leave `ψ` regauged
+by the first one and then throw.
+
+Four things that are easy to get wrong here, all of them load-bearing:
+
+- **`qr(M).Q` has a different type per backend.** It is a *square* `m × m` `AbstractQ` operator
+  on `Array`/`CuArray` — Julia 1.10 decoupled `AbstractQ` from `AbstractMatrix` — but an
+  already-materialized thin `m × k` matrix under Reactant, whose factorization has no
+  `AbstractQ` wrapper. `_thin_q` dispatches on exactly that: two methods, not one shape test,
+  because for a square bond matrix `m == k` the two cases are indistinguishable by shape.
+- **`Qf * _eye(M, k)` rather than `Matrix(F.Q)`**, which would materialize the square factor and
+  move a `CuArray` to the host. The multiply dispatches to LAPACK `ormqr` (cuSOLVER on a GPU).
+- **Bind `F.Q` once.** Under Reactant every `getproperty(F, :Q)` re-emits the `orgqr` call.
+- **`factorize_right` is a `qr` of the adjoint**, not an `lq` — CUDA's `lq` coverage is
+  unreliable. `M' ≈ Q*R` gives `M ≈ R'*Q'`, and `Q'` has the orthonormal rows wanted. The
+  adjoints are materialized with `copy`: the input because a lazy wrapper is a poor thing to
+  hand a tracing backend, the outputs so both methods return dense factors.
+
+Reactant's `qr` is **not in a released version**: no released Reactant wraps
+`lapack.geqrf`/`lapack.orgqr`, and its `enzymexla.linalg.qr` op is unwired. `test/reactant/`
+pins <https://github.com/albertomercurio/Reactant.jl/pull/2> through a `[sources]` block in its
+`Project.toml`; delete that block and raise the compat bound once it lands upstream. There are
+also **no AD rules** for `geqrf`/`orgqr`, so a QR gauge sweep will not differentiate under
+Enzyme — worth knowing before DMRG/TDVP lean on it.
+
+`CholeskyQRFactorization` remains viable on backends with `cholesky` but no `qr`. A
+`QRSVDFactorization` (QR, then SVD the small `R`) would be able to truncate, but LAPACK's
+`gesdd` already does that preprocessing for `m ≥ 5n/3` — and `m/n = d = 2` — so measure before
+building it.
 
 ### Seven Reactant rules
 
@@ -324,11 +356,10 @@ Deliberately deferred, in rough order:
    linear map so any Krylov solver consumes it. Reactant has no `eigen`, so the local
    eigensolver must be a hand-written Lanczos over matvecs.
 2. **TDVP** — same environments, exponentiation instead of diagonalization.
-3. `QRFactorization`, per the notes above.
-4. **General Hamiltonian-MPO builders** from sums of local terms. Until then, build MPOs by hand
+3. **General Hamiltonian-MPO builders** from sums of local terms. Until then, build MPOs by hand
    — see `tfim_mpo` in `test/testutils.jl` and the documentation.
-5. MPS addition / direct sum; needed by variational and Krylov methods.
-6. **Clifford-Augmented MPS (CAMPS)**: `struct CliffordMPS <: AbstractMatrixProduct{1}` holding a
+4. MPS addition / direct sum; needed by variational and Krylov methods.
+5. **Clifford-Augmented MPS (CAMPS)**: `struct CliffordMPS <: AbstractMatrixProduct{1}` holding a
    tableau plus an `MPS`. This is why `src/abstract.jl` documents a five-method interface and
    why every algorithm is written against it rather than against the concrete type.
-7. Infinite MPS; shape-keyed thunk caching for Reactant.
+6. Infinite MPS; shape-keyed thunk caching for Reactant.

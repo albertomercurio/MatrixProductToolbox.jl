@@ -148,17 +148,61 @@ Q' * Q ≈ I, Q * R ≈ M
 [`factorize_left`](@ref) produces orthonormal *columns* for left-to-right sweeps;
 [`factorize_right`](@ref) produces orthonormal *rows* for the other direction.
 
-### Why the SVD is the only factorization
+## [Choosing a factorization](@id man-factorizations)
 
-A QR would be roughly 2–3× faster on untruncated sweeps, but the SVD is needed for truncation
-regardless, and it is the one factorization available on *every* backend — Reactant has no `qr`.
-Using it everywhere means a single code path and no per-backend configuration.
+There are two, and the whole distinction is truncation:
 
-[`AbstractFactorization`](@ref) and the `factorization` keyword exist so that adding
-`QRFactorization` later is purely additive:
+| | Rank kept | Can truncate? | Gives singular values? | Sees rank deficiency? | Relative cost |
+|:---|:---|:---:|:---:|:---:|:---|
+| [`SVDFactorization`](@ref) | any `k ≤ min(m, n)` | ✅ | ✅ | ✅ | 1× |
+| [`QRFactorization`](@ref) | always `min(m, n)` | ❌ | ❌ | ❌ | ~0.35× |
+
+Both run on `Array`, `CuArray` and Reactant, and both are exact when nothing is discarded. So
+the rule is simply **what the sweep is for**:
 
 ```julia
-canonicalize!(ψ, 3; factorization = SVDFactorization())
+canonicalize!(ψ, 3; factorization = QRFactorization())   # moving the centre: use the QR
+truncate!(ψ; maxdim = 32)                                # discarding: must be the SVD
+```
+
+Measured on a 20-site chain, one full sweep, single-threaded CPU:
+
+| `maxdim` | SVD | QR | speed-up |
+|---:|---:|---:|---:|
+| 16 | 1.12 ms | 0.56 ms | 2.0× |
+| 32 | 4.50 ms | 2.24 ms | 2.0× |
+| 64 | 24.3 ms | 9.2 ms | 2.6× |
+| 128 | 90.4 ms | 30.6 ms | 3.0× |
+
+The gap widens with ``\chi`` because the two scale the same way but not with the same constant:
+Householder QR plus a thin ``Q`` is about ``4d\chi^3`` for a ``\chi d \times \chi`` bond matrix,
+against roughly ``(6d + 20)\chi^3`` for a thin SVD whose divide-and-conquer phase also
+parallelises poorly.
+
+On an accelerator the difference is not a constant factor but the difference between usable and
+not: a gauge sweep measures *5–50× slower than the CPU* there, because a chain of small
+sequential SVDs is close to the worst case for a GPU. The measurements are on the
+[Array backends](@ref man-backends) page.
+
+`truncate!` refuses a factorization that cannot truncate, and it refuses *before* it mutates
+anything, so a rejected call leaves `ψ` untouched rather than half-swept:
+
+```julia
+truncate!(ψ; maxdim = 3, factorization = QRFactorization())   # ArgumentError, ψ unchanged
+truncate!(ψ; trunc = NoTruncation(), factorization = QRFactorization())   # fine: discards nothing
+```
+
+!!! note "The QR cannot see a rank-deficient bond"
+    It is unpivoted, so a numerically null direction is kept rather than dropped. `Q` is still an
+    exact isometry and `Q * R ≈ M` still holds — the corresponding row of `R` is simply near
+    zero. Where that matters, use the SVD with a cutoff, which is the only thing that can
+    *identify* the discardable directions in the first place.
+
+Gauging is also cheaper for the entanglement measures, which take their own `svdvals` after the
+sweep and so do not care how the sweep was gauged:
+
+```julia
+entanglement_entropy(ψ, 4; factorization = QRFactorization())
 ```
 
 ## Entanglement

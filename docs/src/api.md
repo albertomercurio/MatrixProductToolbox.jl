@@ -66,6 +66,7 @@ FixedTruncation
 ```@docs
 AbstractFactorization
 SVDFactorization
+QRFactorization
 factorize_left
 factorize_right
 ```

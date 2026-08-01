@@ -6,6 +6,18 @@ Reactant = "3c362404-f566-11ee-1572-e11a4b42c853"
 TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
+# TEMPORARY. `QRFactorization` needs `LinearAlgebra.qr` on traced arrays, which no released
+# Reactant has: upstream wraps neither `lapack.geqrf` nor `lapack.orgqr`, and its
+# `enzymexla.linalg.qr` op is not wired up. The branch below adds them.
+#
+#     https://github.com/albertomercurio/Reactant.jl/pull/2
+#
+# To undo once that is merged and released: delete this whole `[sources]` section and raise the
+# `Reactant` compat bound to the first release that carries it. Nothing else in the repository
+# refers to the fork -- the package itself has no Reactant dependency, weak or otherwise.
+[sources]
+Reactant = {url = "https://github.com/albertomercurio/Reactant.jl", rev = "claude/qr-factorization-support-a0g190"}
+
 [compat]
 Reactant = "0.2.275"
 TensorOperations = "5.6"

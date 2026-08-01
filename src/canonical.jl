@@ -64,7 +64,8 @@ gauge transformation: it leaves the represented state untouched.
 - `c`: the target site for the orthogonality centre.
 - `trunc`: an [`AbstractTruncation`](@ref) policy. Only bonds the sweep crosses are affected,
   so use [`truncate!`](@ref) to truncate every bond.
-- `factorization`: an [`AbstractFactorization`](@ref).
+- `factorization`: an [`AbstractFactorization`](@ref). The default `trunc` discards nothing, so
+  [`QRFactorization`](@ref) applies here and is 2–3× faster.
 
 # Notes
 - Only the bonds between the current centre and `c` are touched, so repeatedly moving the
@@ -143,6 +144,9 @@ of the bond.
 # Notes
 - Truncation is not a gauge transformation: it changes the represented state unless every
   discarded singular value is zero.
+- `factorization` must be able to truncate unless `trunc` is [`NoTruncation`](@ref), which rules
+  out [`QRFactorization`](@ref). That is checked before anything is mutated, so a rejected
+  combination leaves `ψ` untouched rather than half-swept.
 
 # Returns
 - `ψ`: the same object, mutated.
@@ -181,6 +185,17 @@ function truncate!(
     )
     L = length(ψ)
     (1 ≤ to ≤ L) || throw(ArgumentError("The orthogonality centre must lie in 1:$L, got $to."))
+    # Ask before mutating anything. Of the three sweeps below only the middle one truncates, so a
+    # factorization that cannot truncate would otherwise fail after the first sweep had already
+    # regauged `ψ` -- an error and a half-transformed object.
+    (_supports_truncation(factorization) || trunc isa NoTruncation) || throw(
+        ArgumentError(
+            "`truncate!` was given $(typeof(factorization)), which cannot truncate, together " *
+                "with $(typeof(trunc)). Use `SVDFactorization()` here; a non-truncating " *
+                "factorization belongs in `canonicalize!`, or in `truncate!` with " *
+                "`trunc = NoTruncation()`."
+        )
+    )
     canonicalize!(ψ, L; factorization)
     canonicalize!(ψ, 1; trunc, factorization)
     return canonicalize!(ψ, to; factorization)
