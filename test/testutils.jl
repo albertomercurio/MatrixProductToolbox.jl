@@ -103,6 +103,14 @@ const GAUGE_PROBES = [
     "canonicalize mid-chain" => (H, ψ, φ) -> expect(H, canonicalize(ψ, 3)),
     "fixed truncation" =>
         (H, ψ, φ) -> expect(H, canonicalize(ψ, BACKEND_SITES; trunc = FixedTruncation(2))),
+    # The QR path has to clear the same bar as the SVD one on every backend. It reaches
+    # `LinearAlgebra.qr`, which is a different per-backend code path from `svd` -- an
+    # `AbstractQ` operator on `Array`/`CuArray`, a materialized thin factor under Reactant --
+    # so it earns its own probes rather than riding on the ones above.
+    "canonicalize (QR)" =>
+        (H, ψ, φ) -> expect(H, canonicalize(ψ, BACKEND_SITES; factorization = QRFactorization())),
+    "canonicalize mid-chain (QR)" =>
+        (H, ψ, φ) -> expect(H, canonicalize(ψ, 3; factorization = QRFactorization())),
 ]
 
 const BACKEND_PROBES = vcat(CONTRACTION_PROBES, GAUGE_PROBES)

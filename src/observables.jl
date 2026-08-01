@@ -184,7 +184,7 @@ function expect(op::AbstractMatrix, ψ::AbstractMatrixProduct{1})
 end
 
 @doc raw"""
-    entanglement_spectrum(ψ, bond)
+    entanglement_spectrum(ψ, bond; factorization = SVDFactorization())
 
 Schmidt coefficients across `bond`, normalised so that ``\sum_i \lambda_i^2 = 1``.
 
@@ -193,14 +193,19 @@ Schmidt coefficients across `bond`, normalised so that ``\sum_i \lambda_i^2 = 1`
 # Arguments
 - `ψ`: an [`AbstractMatrixProduct`](@ref).
 - `bond`: the bond to cut at.
+- `factorization`: used to *gauge* `ψ` first. The spectrum always comes from a separate
+  `svdvals`, so [`QRFactorization`](@ref) is a free speed-up here.
 
 # Returns
 - `λ`: the Schmidt coefficients in descending order.
 """
-function entanglement_spectrum(ψ::AbstractMatrixProduct, bond::Integer)
+function entanglement_spectrum(
+        ψ::AbstractMatrixProduct, bond::Integer;
+        factorization::AbstractFactorization = SVDFactorization()
+    )
     L = length(ψ)
     (1 ≤ bond ≤ L - 1) || throw(ArgumentError("`bond` must lie in 1:$(L - 1), got $bond."))
-    φ = canonicalize(ψ, bond)
+    φ = canonicalize(ψ, bond; factorization)
     t = φ[bond]
     s = svdvals(reshape(t, :, size(t, ndims(t))))
     n = norm(s)
@@ -208,7 +213,7 @@ function entanglement_spectrum(ψ::AbstractMatrixProduct, bond::Integer)
 end
 
 @doc raw"""
-    entanglement_entropy(ψ, bond)
+    entanglement_entropy(ψ, bond; factorization = SVDFactorization())
 
 Von Neumann entanglement entropy across `bond`, in nats.
 
@@ -218,6 +223,7 @@ Computed as ``S = -\sum_i \lambda_i^2 \log \lambda_i^2`` from the normalised
 # Arguments
 - `ψ`: an [`AbstractMatrixProduct`](@ref).
 - `bond`: the bond to cut at, in `1:length(ψ)-1`.
+- `factorization`: forwarded to [`entanglement_spectrum`](@ref).
 
 # Returns
 - `S::Real`: the entropy in nats; divide by `log(2)` for bits.
@@ -230,7 +236,10 @@ julia> entanglement_entropy(bell, 1) ≈ log(2)
 true
 ```
 """
-function entanglement_entropy(ψ::AbstractMatrixProduct, bond::Integer)
-    p = abs2.(entanglement_spectrum(ψ, bond))
+function entanglement_entropy(
+        ψ::AbstractMatrixProduct, bond::Integer;
+        factorization::AbstractFactorization = SVDFactorization()
+    )
+    p = abs2.(entanglement_spectrum(ψ, bond; factorization))
     return -sum(x -> x > zero(x) ? x * log(x) : zero(x), p)
 end

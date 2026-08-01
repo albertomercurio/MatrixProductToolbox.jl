@@ -3,7 +3,7 @@ module MatrixProductToolbox
 using LinearAlgebra
 
 ## Standard Julia libraries
-import LinearAlgebra: dot, norm, normalize, normalize!, svd, svdvals, I
+import LinearAlgebra: dot, norm, normalize, normalize!, qr, svd, svdvals, I
 import Random: AbstractRNG, default_rng
 
 ## other dependencies (in alphabetical order)

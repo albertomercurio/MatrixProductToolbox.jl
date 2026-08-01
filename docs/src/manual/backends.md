@@ -9,8 +9,8 @@ all** — no `[weakdeps]`, no `[extensions]`, no configuration hooks. The depend
 `TensorOperations`, `LinearAlgebra`, `Random` and `Adapt`, and nothing else.
 
 That works because every operation the package performs is either generic Julia (`reshape`,
-`similar`, `*`, broadcast, `sum`), `LinearAlgebra.svd`, or a TensorOperations `@tensor` call — and
-the ecosystem already supplies the per-backend pieces:
+`similar`, `*`, broadcast, `sum`), `LinearAlgebra.svd` / `LinearAlgebra.qr`, or a TensorOperations
+`@tensor` call — and the ecosystem already supplies the per-backend pieces:
 
 | Backend | Who provides the support | You must load |
 |:---|:---|:---|
@@ -88,6 +88,12 @@ compiled(H, ψ)
 Note the two deliberate choices: `FixedTruncation` rather than a cutoff, and one compiled
 function covering the whole sweep.
 
+!!! warning "Reactant's `qr` is not released yet"
+    [`QRFactorization`](@ref) needs `LinearAlgebra.qr` on traced arrays, which no released
+    Reactant provides. `test/reactant/` pins a fork branch through a `[sources]` block in its
+    `Project.toml`. Nothing else depends on it: the package has no Reactant dependency, weak or
+    otherwise.
+
 ### Seven rules
 
 1. **Every `!` function returns its argument.** Returning is what reliably propagates updated
@@ -130,19 +136,28 @@ before drawing conclusions.
 |:---|:---|
 | Contractions — `dot`, `expect`, `apply`, the transfer kernels | ✅ exact to machine precision at `L = 60`, `χ = 32` |
 | Gauge and truncation in `Float64` | ✅ exact at `L = 40`, `χ = 32` |
-| Gauge and truncation in `ComplexF64` | ❌ **broken upstream** |
+| Gauge in `ComplexF64` with [`QRFactorization`](@ref) | ✅ exact at `L = 10`, `χ = 8` |
+| Gauge and truncation in `ComplexF64` with [`SVDFactorization`](@ref) | ❌ **broken upstream** |
 
 The one broken cell is Reactant's **complex** SVD on the CPU backend. It is silently wrong at
 small bond dimensions (relative error ≈ 0.26 at `L = 10`, `χ = 4`, with LAPACK `ZUNMBR` errors on
 stderr) and segfaults from about `χ = 6` upwards. The real SVD is exact.
 
 That is an upstream limitation, not a design problem here — nothing in the six contraction kernels
-changes when it is fixed. But it does mean that today, **`canonicalize` and `truncate` under
-Reactant are only usable in `Float64`.**
+changes when it is fixed.
+
+**A QR is unaffected**, because it is a different lowering entirely (`geqrf` + `ungqr` rather
+than `gesdd`). Measured against the CPU answer at exactly the sizes where the SVD fails:
+relative error `6e-16` at `L = 10`, `χ = 4` and `1e-15` at `χ = 8`. So today, under Reactant:
+
+- **A complex gauge sweep works — with [`QRFactorization`](@ref).** This is the reason to reach
+  for it here, ahead of the 2–3×.
+- **Complex truncation does not work at all**, since only the SVD can discard anything.
+- `Float64` is fine either way.
 
 !!! warning "Check your results against the CPU"
-    The complex failure mode is silent at small sizes. Always compare a newly compiled function
-    against the plain-Julia answer before trusting it.
+    The complex SVD failure mode is silent at small sizes. Always compare a newly compiled
+    function against the plain-Julia answer before trusting it.
 
 ### Performance
 
@@ -192,9 +207,10 @@ Three conclusions:
    into fused kernels. The cost is 13–20 s of compilation per shape signature.
 3. **The SVD is the bottleneck, badly.** Both accelerators are *5–50× slower* than the CPU on a
    gauge sweep. A canonicalization is a long chain of small, sequential, data-dependent
-   factorizations — close to the worst case for a GPU. This is the single strongest argument for
-   adding a `QRFactorization` (far more GPU-friendly than an SVD) and for batching the
-   factorizations across bonds.
+   factorizations — close to the worst case for a GPU. This is what
+   [`QRFactorization`](@ref) is for: measured at 2–3× on the CPU, and far more GPU-friendly
+   than an SVD. Batching the factorizations across bonds is the other half of the fix and is
+   still to do.
 
 ### Is `BaseCopy` costing us anything?
 

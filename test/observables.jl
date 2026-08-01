@@ -128,6 +128,16 @@ end
 
     @test_throws ArgumentError entanglement_entropy(ψ, 0)
     @test_throws ArgumentError entanglement_entropy(ψ, 6)
+
+    # The gauge sweep and the spectrum are separate steps: the sweep only has to produce *a*
+    # canonical form, and the `svdvals` that follows is what fixes the Schmidt coefficients. So
+    # gauging with a QR -- which has no singular values of its own -- must change nothing.
+    for b in 1:5
+        @test entanglement_spectrum(ψ, b; factorization = QRFactorization()) ≈
+            entanglement_spectrum(ψ, b)
+        @test entanglement_entropy(ψ, b; factorization = QRFactorization()) ≈
+            entanglement_entropy(ψ, b)
+    end
 end
 
 @testset "dense" begin
