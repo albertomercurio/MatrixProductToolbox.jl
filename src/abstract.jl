@@ -171,3 +171,19 @@ _physsize(t::AbstractArray, ::Val{N}) where {N} = ntuple(k -> size(t, k + 1), Va
 # A boundary environment: all entries equal to one. Correct because boundary bonds have
 # dimension 1, and free of scalar indexing so it works on any backend.
 _boundary(t::AbstractArray, ::Type{T}, dims::Tuple) where {T} = fill!(similar(t, T, dims), one(T))
+
+# A norm held away from zero, for the divisions that normalise a vector. `iszero(n) && throw(…)`
+# would be a branch on a value, which a traced backend cannot express; flooring is the same
+# guard written so that it survives tracing. `oftype` keeps the element type, so a `Float32`
+# problem does not silently widen.
+_floor_norm(n) = max(n, oftype(n, 1.0e-30))
+
+# The Euclidean norm of a tensor, as a reduction rather than through `LinearAlgebra.norm`.
+#
+# The two are the same number, but `norm`'s generic fallback *iterates* its argument, and under
+# Reactant a `reshape` is a lazy `Base.ReshapedArray` rather than a traced array — which is what
+# every site tensor is here, since this package reshapes everywhere. Iterating one is scalar
+# indexing, and fails. `dot`, `sum` and broadcasting all handle the wrapper; `norm` alone does
+# not, so it is the one call that has to be spelled out. `sum` is the reduction this package
+# already trusts, for the same reason it reduces a 1×1 environment with `sum(E)` and never `E[1]`.
+_norm2(x::AbstractArray) = sqrt(sum(abs2, x))

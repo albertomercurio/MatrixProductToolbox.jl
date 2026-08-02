@@ -15,6 +15,7 @@ const PAGES = [
     "Manual" => [
         "Matrix products" => "manual/matrix_products.md",
         "Canonical forms and truncation" => "manual/canonical_forms.md",
+        "Algorithms" => "manual/algorithms.md",
         "Array backends" => "manual/backends.md",
     ],
     "API" => "api.md",

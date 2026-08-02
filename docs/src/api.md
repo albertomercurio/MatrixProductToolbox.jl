@@ -107,6 +107,45 @@ dense
 Base.Array
 ```
 
+## Algorithms
+
+```@docs
+dmrg
+dmrg!
+DMRGSolution
+tdvp
+tdvp!
+TDVPSolution
+```
+
+### Environments
+
+```@docs
+Environments
+leftenv
+rightenv
+invalidate!
+```
+
+### Local solvers
+
+```@docs
+AbstractEigenSolver
+AbstractExpSolver
+LanczosEigen
+LanczosExponential
+krylov_eigen
+krylov_exp
+```
+
+### Projected-solve policies
+
+```@docs
+AbstractRitzSolver
+DenseRitz
+TracedRitz
+```
+
 ## Backend support
 
 ```@docs

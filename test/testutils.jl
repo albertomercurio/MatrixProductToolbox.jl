@@ -115,6 +115,45 @@ const GAUGE_PROBES = [
 
 const BACKEND_PROBES = vcat(CONTRACTION_PROBES, GAUGE_PROBES)
 
+# The sweeping algorithms, as probes of the same shape. Kept out of `BACKEND_PROBES` because they
+# are an order of magnitude slower than everything above and because a backend can reasonably
+# support the contractions and the gauge without being able to run a whole sweep.
+#
+# Both use `FixedTruncation` and `TracedRitz`, which is what makes them legal under tracing: the
+# bond dimensions follow from shapes alone, the Lanczos runs a fixed number of steps, and the
+# projected solve never branches on a value. `TracedRitz` solves the *same* projected problem as
+# the default, so these compare against the CPU answer to floating-point tolerance -- not to the
+# loose one a different algorithm would force.
+const ALGORITHM_CHI = 4
+const ALGORITHM_KRYLOVDIM = 8
+
+const ALGORITHM_PROBES = [
+    "dmrg" => (H, ψ, φ) -> dmrg(
+        H, ψ; nsweeps = 2, trunc = FixedTruncation(ALGORITHM_CHI), verbose = false,
+        solver = LanczosEigen(; krylovdim = ALGORITHM_KRYLOVDIM, ritz = TracedRitz())
+    ).energy,
+    "tdvp (imaginary time)" => (H, ψ, φ) -> expect(
+        H, tdvp(
+            H, ψ, [0.0, 0.1]; imaginary = true, trunc = FixedTruncation(ALGORITHM_CHI),
+            progress = false,
+            solver = LanczosExponential(; krylovdim = ALGORITHM_KRYLOVDIM, ritz = TracedRitz())
+        ).states[end]
+    ),
+]
+
+# Real-time TDVP, which is separate for the same reason the gauge probes are separate from the
+# contraction ones: it needs strictly more of a backend. The step factor `-i·dt/2` is complex, so
+# the state must be too, and the two-site split must therefore truncate a *complex* SVD. A backend
+# whose complex SVD is broken — Reactant's, today — can run everything above and not this.
+const COMPLEX_ALGORITHM_PROBES = [
+    "tdvp (real time)" => (H, ψ, φ) -> expect(
+        H, tdvp(
+            H, ψ, [0.0, 0.05]; trunc = FixedTruncation(ALGORITHM_CHI), progress = false,
+            solver = LanczosExponential(; krylovdim = ALGORITHM_KRYLOVDIM, ritz = TracedRitz())
+        ).states[end]
+    ),
+]
+
 # The reference inputs, on the CPU. A backend adapts these and compares against the values the
 # probes produce here. `T` is a parameter because a backend may support one element type and not
 # another.

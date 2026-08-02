@@ -66,7 +66,7 @@ The Euclidean norm ``\sqrt{\langle \psi | \psi \rangle}``.
 - `n::Real`: the norm.
 """
 function norm(ψ::AbstractMatrixProduct)
-    iscanonical(ψ) && return norm(ψ[only(center(ψ))])
+    iscanonical(ψ) && return _norm2(ψ[only(center(ψ))])
     return sqrt(abs(real(dot(ψ, ψ))))
 end
 
@@ -87,7 +87,7 @@ tensor is touched.
 function normalize!(ψ::AbstractMatrixProduct)
     iscanonical(ψ) || canonicalize!(ψ, 1)
     c = only(center(ψ))
-    n = norm(ψ[c])
+    n = _norm2(ψ[c])
     iszero(n) && throw(ArgumentError("Cannot normalise a matrix-product object of zero norm."))
     setsite!(ψ, c, ψ[c] ./ n)
     return ψ

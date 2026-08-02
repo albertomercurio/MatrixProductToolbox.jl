@@ -47,6 +47,18 @@ if GROUP in ("All", "Core")
         @testset "Observables" begin
             include("observables.jl")
         end
+        @testset "Local solvers" begin
+            include("krylov.jl")
+        end
+        @testset "Environments" begin
+            include("environments.jl")
+        end
+        @testset "DMRG" begin
+            include("dmrg.jl")
+        end
+        @testset "TDVP" begin
+            include("tdvp.jl")
+        end
         @testset "Backends" verbose = true begin
             include("backends.jl")
         end
