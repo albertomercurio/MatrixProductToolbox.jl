@@ -131,17 +131,29 @@ end
 end
 
 @testset "the two Ritz policies solve the same problem" begin
-    # Same recurrence, same fixed `krylovdim`, different projected solve. Compared over many
-    # random problems and scales, because this is the assumption every cross-backend comparison
-    # of `dmrg`/`tdvp` rests on.
+    #=
+    Same recurrence, same fixed `krylovdim`, different projected solve. Compared over many random
+    problems and scales, because this is the assumption every cross-backend comparison of
+    `dmrg`/`tdvp` rests on.
+
+    The sizes, scales and Krylov dimensions are a fixed host-side schedule rather than draws from
+    `rng`. `rand(rng, a:b)` does not produce the same stream on every Julia version, so drawing
+    them made *which problems this testset covers* a function of the version: the same seed found
+    a projected spectrum whose gap is small next to its Gershgorin width on 1.10 and did not on
+    1.12, so a real defect in `TracedRitz` was visible on one CI job and invisible on every other
+    and on every local run. Only `randn` feeds the matrices now, and its stream is stable.
+    =#
     rng = MersenneTwister(35)
+    sizes = (2, 3, 5, 6, 8, 11, 13, 17, 21, 24)
+    exponents = (-2, -1, 0, 1, 2)
+    kds = (2, 3, 5, 7, 9, 12, 14, 16)
     for trial in 1:60
-        n = rand(rng, 2:24)
+        n = sizes[mod1(trial, length(sizes))]
         T = isodd(trial) ? Float64 : ComplexF64
-        scale = 10.0^rand(rng, -2:2)
+        scale = 10.0^exponents[mod1(trial, length(exponents))]
         A = scale .* _random_hermitian(T, n, rng)
         x₀ = randn(rng, T, n)
-        kd = min(rand(rng, 2:16), n)
+        kd = min(kds[mod1(trial, length(kds))], n)
 
         λd, vd = krylov_eigen(LanczosEigen(; krylovdim = kd, maxiter = 2, ritz = DenseRitz()), _map_of(A), x₀)
         λt, vt = krylov_eigen(LanczosEigen(; krylovdim = kd, maxiter = 2, ritz = TracedRitz()), _map_of(A), x₀)
@@ -155,6 +167,73 @@ end
         yd = krylov_exp(LanczosExponential(; krylovdim = kd, ritz = DenseRitz()), τ, _map_of(A), x₀)
         yt = krylov_exp(LanczosExponential(; krylovdim = kd, ritz = TracedRitz()), τ, _map_of(A), x₀)
         @test yt ≈ yd rtol = 1.0e-9
+    end
+end
+
+@testset "a gap that is small next to the Gershgorin width" begin
+    #=
+    The case that breaks a projected solve which cannot branch. `TracedRitz` isolates the lowest
+    eigenvector with a filter whose strength is set by the gap measured against the width of the
+    Gershgorin discs — *not* against the gap's own scale — so a spectrum with two close low-lying
+    eigenvalues and a wide spread above them is where an under-strength filter lands on the
+    second one and the Rayleigh-quotient polish then converges onto it, cubically and silently.
+    An imaginary-time projection did exactly that, returning a value 8.7% above the true minimum.
+
+    Built from a prescribed spectrum rather than sampled, so the ratio being probed is set here
+    rather than left to chance.
+    =#
+    rng = MersenneTwister(37)
+    n = 24
+    Q = Matrix(qr(randn(rng, n, n)).Q)
+    x₀ = randn(rng, n)
+    for gap in (1.0, 0.1, 0.01, 1.0e-3), spread in (10.0, 100.0, 1000.0)
+        λs = [-1.0, -1.0 + gap, range(1.0, spread; length = n - 2)...]
+        A = Q * Diagonal(λs) * Q'
+        A = (A + A') ./ 2
+        for kd in (4, 8, 12, 16)
+            λd, _ = krylov_eigen(LanczosEigen(; krylovdim = kd, maxiter = 2, ritz = DenseRitz()), _map_of(A), x₀)
+            λt, vt = krylov_eigen(LanczosEigen(; krylovdim = kd, maxiter = 2, ritz = TracedRitz()), _map_of(A), x₀)
+            @test λt ≈ λd rtol = 1.0e-9
+            @test λt ≥ λs[1] - 1.0e-9
+            @test λt ≈ dot(vt, A * vt) / dot(vt, vt) atol = 1.0e-9
+        end
+    end
+end
+
+@testset "an exact Lanczos breakdown" begin
+    #=
+    A multiple of the identity exhausts the Krylov space after one vector, *exactly*: the residual
+    is zero rather than merely small. An eager Lanczos stops there, but the traceable policy sets
+    `tol = 0` and cannot look, so it keeps going. Flooring the divisor alone would put a zero
+    vector in the basis, and with it a spurious eigenvalue at 0 whose eigenvector is zero — so a
+    positive-definite map reported 0 and handed back nothing at all.
+
+    The null map is the same thing with the spectrum at 0, and is what a zero MPO produces.
+    =#
+    rng = MersenneTwister(38)
+    x₀ = randn(rng, 8)
+    for ritz in (DenseRitz(), TracedRitz()), c in (0.0, 3.0, -2.5, 1.0e-8)
+        f = x -> c .* x
+        for kd in (2, 5, 12)
+            λ, v = krylov_eigen(LanczosEigen(; krylovdim = kd, maxiter = 2, ritz), f, x₀)
+            @test λ ≈ c atol = 1.0e-12
+            @test norm(v) ≈ 1
+        end
+        y = krylov_exp(LanczosExponential(; krylovdim = 6, ritz), -0.1, f, x₀)
+        @test y ≈ exp(-0.1 * c) .* x₀
+    end
+
+    # And the whole way up: DMRG on a null Hamiltonian must return a normalised state and a finite
+    # energy rather than a `NaN` from `0/0`.
+    H = MPO([zeros(Float64, 1, 2, 2, 1) for _ in 1:4])
+    ψ₀ = rand_mps(Float64, fill(2, 4); maxdim = 4, rng = MersenneTwister(39))
+    for ritz in (DenseRitz(), TracedRitz())
+        sol = dmrg(
+            H, ψ₀; nsweeps = 2, trunc = FixedTruncation(4), verbose = false,
+            solver = LanczosEigen(; krylovdim = 6, ritz)
+        )
+        @test sol.energy ≈ 0 atol = 1.0e-12
+        @test norm(sol.state) ≈ 1
     end
 end
 

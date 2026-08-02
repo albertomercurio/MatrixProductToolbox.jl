@@ -364,10 +364,22 @@ things about them belong here.
 Lanczos builds an orthonormal Krylov basis (traceable once `m` is fixed) and then solves a small
 `m × m` problem (not traceable: Reactant wraps no `eigen`, and `LinearAlgebra.exp` of a matrix
 picks its squaring count from `opnorm`). So only that second half is a policy — `DenseRitz` calls
-LAPACK, `TracedRitz` gets the same two answers from an imaginary-time projection plus
+LAPACK, `TracedRitz` gets the same two answers from a repeatedly-squared spectral filter plus
 Rayleigh-quotient iteration, and a fixed-squaring Padé. Running **one algorithm everywhere** is
 what lets `backend_testset` compare a traced sweep against the CPU answer at floating-point
 tolerance rather than a loose one. Do not replace `TracedRitz` with a different algorithm.
+
+**A branch-free eigensolve is only as good as its worst spectrum, so test it over many.** The
+filter's strength is the gap measured against the *Gershgorin width*, not against the gap's own
+scale, and an under-strength one lands on the second eigenvalue — cubically and silently, a
+variational method returning an excited state. An imaginary-time projection `exp(-βT)` was the
+first attempt and does exactly that on 7 of 4000 random Hermitian matrices, the worst 8.7% high;
+`test/krylov.jl` now builds that spectrum on purpose rather than hoping to sample it. Two
+corollaries. Never draw a test's *problem sizes* from an RNG: `rand(rng, a:b)` has no stable
+stream across Julia versions, so that defect was visible on the 1.10 CI job and on nothing else.
+And `tol = 0` means the recurrence cannot stop at an exact breakdown, so it must pad the basis
+with the previous vector — a zero vector there is a spurious eigenvalue at 0 with a zero
+eigenvector, which a positive-definite effective operator then returns.
 
 **Reorthogonalize twice.** `_lanczos` runs modified Gram-Schmidt against the whole basis *twice*,
 and this is load-bearing rather than cautious. DMRG hands the solver a block that is already

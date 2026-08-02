@@ -202,7 +202,7 @@ So the projected solve, and only the projected solve, is a policy:
 | [`AbstractRitzSolver`](@ref) | lowest eigenpair | ``e^{\tau T} e_1`` | traceable |
 |:---|:---|:---|:---:|
 | [`DenseRitz`](@ref) (default) | `eigen(SymTridiagonal(α, β))` | via the same decomposition | ❌ |
-| [`TracedRitz`](@ref) | projection, then Rayleigh-quotient iteration | scaling-and-squaring Padé | ✅ |
+| [`TracedRitz`](@ref) | a squared spectral filter, then Rayleigh-quotient iteration | scaling-and-squaring Padé | ✅ |
 
 Selecting `TracedRitz` also turns the convergence test off, so the Lanczos runs its full
 `krylovdim`. It is not a different *algorithm* — it computes the same two quantities by a
@@ -235,15 +235,45 @@ never comes close. Over-squaring is the usual hazard of freezing `s`, but not he
 always ``\tau`` times a Hermitian tridiagonal, so ``e^A`` is normal — unitary in real time — and
 repeated squaring of a normal matrix is well conditioned.
 
-**The eigenpair.** An imaginary-time projection reusing that same exponential: ``e^{-\beta T}``
-with ``\beta\|T\|`` large suppresses every eigenvector but the lowest, and a Gershgorin bound on
-the spectral radius makes ``\beta\|T\|`` a known constant whatever the scale of ``H``. Then a few
-steps of Rayleigh-quotient iteration, which converges cubically once it is in the right basin.
+**The eigenpair.** A polynomial filter, built by repeated squaring. Gershgorin gives an interval
+``[\ell, h]`` containing the spectrum, and
 
-A shifted inverse iteration would be the obvious alternative, and is wrong here: the only shift
-available a priori is a Gershgorin *lower* bound, which sits a full spectral radius below
-``\lambda_{\min}``, and from there ``(T - \sigma I)^{-1}`` barely separates the spectrum —
-Rayleigh-quotient iteration started from it lands on whichever eigenvalue happens to be nearest.
+```math
+B \;=\; I + \frac{h I - T}{h - \ell}
+```
+
+is positive definite with its *largest* eigenvalue at ``\lambda_1``. Squaring ``B`` ``k`` times
+raises it to the power ``2^k``, so the lowest eigenvector wins by
+``\big((h-\lambda_1)/(h-\lambda_2)\big)^{2^k}`` — a separation exponential in the number of
+multiplies, where a plain power iteration would need ``2^k`` of them. Then a few steps of
+Rayleigh-quotient iteration, which converges cubically once it is in the right basin.
+
+Three details are load-bearing. **Renormalising after every squaring** is what makes a fixed
+``k`` safe: the eigenvalues are raised to ``2^k \approx 10^7``, so without it the matrix would
+overflow or underflow depending on where the spectrum happens to sit. Dividing by a norm changes
+no ratio, and a norm is a reduction rather than a branch — so over-filtering costs nothing and
+`filtersteps` may be set for the worst case. **Shifting by ``h + (h-\ell)``** rather than by
+``h`` — the ``I +`` — keeps ``B \succ 0`` even when the Gershgorin interval degenerates to a
+point, which is the case of a null effective operator; there ``B`` is the identity and the
+eigenpair comes out as ``(0, e_1)`` instead of ``0/0``. And because ``h`` and ``\ell`` are
+Gershgorin bounds rather than the true extremes, the filter's strength is set by the gap measured
+against the *width of the discs*, which is the quantity ``k`` has to cover.
+
+Two alternatives, both worse. An imaginary-time projection ``e^{-\beta T}`` is limited in
+``\beta`` by the exponential's dynamic range, so where the gap is small next to the Gershgorin
+width it under-separates and the polish then converges onto the *second* eigenvalue — measured on
+7 of 4000 random Hermitian matrices, the worst 8.7 % above the true minimum, which is a
+variational method silently returning an excited state. A shifted inverse iteration is worse
+still: the only shift available a priori is ``\ell``, a full spectral radius below
+``\lambda_{\min}``, and from there ``(T - \sigma I)^{-1}`` barely separates anything.
+
+**Breakdown.** An eager Lanczos stops when the residual vanishes, because the Krylov space is
+then invariant and there is no next direction. A traceable one cannot look, so it keeps going and
+would divide by zero. Rather than floor the divisor — which puts a *zero* vector in the basis,
+and with it a spurious eigenvalue at 0 whose eigenvector is zero — the recurrence repeats the
+previous basis vector. That pads the projected matrix with ``\alpha_{j}I``, and ``\alpha_j`` is
+the Rayleigh quotient of a genuine unit vector, so the padding can never sit below the true
+projected minimum: it is unselectable, and harmless if it ties.
 
 The cost of all this is honest: the projected solve emits a few tens of extra operations per
 bond, and a fixed iteration count runs all `m` applications of the map where three would often

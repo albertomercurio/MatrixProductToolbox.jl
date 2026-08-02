@@ -69,32 +69,33 @@ struct DenseRitz <: AbstractRitzSolver end
     struct TracedRitz <: AbstractRitzSolver
         iterations::Int
         squarings::Int
-        projection::Float64
+        filtersteps::Int
     end
 
-    TracedRitz(; iterations = 3, squarings = 12, projection = 32.0)
+    TracedRitz(; iterations = 3, squarings = 12, filtersteps = 24)
 
 Solve the projected problem with branch-free array operations, so that a whole sweep traces.
 
-The exponential is scaling-and-squaring Padé with a fixed number of squarings. The eigenpair
-reuses it: an imaginary-time projection isolates the lowest eigenvector, then Rayleigh-quotient
-iteration polishes it. Selecting this policy also disables the convergence test, so the Lanczos
-runs its full `krylovdim`.
+The exponential is scaling-and-squaring Padé with a fixed number of squarings. The eigenpair uses
+a spectral filter built by repeated squaring, then Rayleigh-quotient iteration to polish.
+Selecting this policy also disables the convergence test, so the Lanczos runs its full
+`krylovdim`.
 
 # Fields (Attributes)
-- `iterations::Int`: Rayleigh-quotient iterations after the projection.
-- `squarings::Int`: squarings in the matrix exponential; `s` covers `‖A‖ ≲ 5.4 · 2^s`.
-- `projection::Float64`: the dimensionless strength `β‖T‖` of the imaginary-time projection.
-  Larger separates a smaller gap, at the cost of an exponential of that size.
+- `iterations::Int`: Rayleigh-quotient iterations after the filter.
+- `squarings::Int`: squarings in the matrix exponential; `s` covers `‖A‖ ≲ 5.4 · 2^s`. Used by
+  the exponential only.
+- `filtersteps::Int`: squarings of the eigenvalue filter, whose degree is `2^filtersteps`. Larger
+  resolves a smaller gap, at one small matrix multiply each.
 """
 struct TracedRitz <: AbstractRitzSolver
     iterations::Int
     squarings::Int
-    projection::Float64
+    filtersteps::Int
 end
 
-TracedRitz(; iterations::Integer = 3, squarings::Integer = 12, projection::Real = 32.0) =
-    TracedRitz(Int(iterations), Int(squarings), Float64(projection))
+TracedRitz(; iterations::Integer = 3, squarings::Integer = 12, filtersteps::Integer = 24) =
+    TracedRitz(Int(iterations), Int(squarings), Int(filtersteps))
 
 # Whether a policy forgoes every value-dependent branch. Internal: it is what turns the
 # convergence test off, rather than the user having to set `tol = 0` to match.
@@ -281,10 +282,22 @@ function _lanczos(f, v₁, m::Integer, tol::Real)
         tol > 0 && b ≤ tol * scale && break
         push!(β, b)
         scale = max(scale, b)
-        v = w ./ _floor_norm(b)
-        push!(V, v)
-        w = f(v)
-        push!(α, real(dot(v, w)))
+        # On an *exact* breakdown the next direction does not exist rather than merely being
+        # small, and `w ./ b` is `0/0`. Flooring the divisor alone would push a **zero** vector
+        # into the basis, which is worse than useless: it enters the projected matrix as a
+        # spurious eigenvalue at 0 whose eigenvector is zero, so a positive-definite effective
+        # operator reports 0 and hands back nothing. Repeating the previous basis vector instead
+        # pads the projected matrix with `α_prev · I`, and `α_prev` is the Rayleigh quotient of a
+        # genuine unit vector, so it can never sit *below* the true projected minimum — the
+        # padding is unselectable, and harmless if it ties.
+        #
+        # A traceable solver cannot take the eager way out here, which is to notice `b == 0` and
+        # stop. The blend is exact at both ends instead: `b / _floor_norm(b)` is `1` for every `b`
+        # above the floor, so an ordinary step is untouched, and `0` at `b == 0`.
+        d = _floor_norm(b)
+        push!(V, w ./ d .+ (one(b) - b / d) .* V[end])
+        w = f(V[end])
+        push!(α, real(dot(V[end], w)))
     end
     return V, α, β
 end
@@ -431,15 +444,15 @@ function _first_unit(α::AbstractVector)
     return one(α[1]) .* e
 end
 
-# Gershgorin bound on the spectral radius: r = maxⱼ (|αⱼ| + |βⱼ₋₁| + |βⱼ|) ≥ max|λ|. `reduce` is a
-# reduction over a host-length collection, not a branch on a value, so it traces.
-function _gershgorin_radius(α::AbstractVector, β::AbstractVector)
+# Gershgorin bounds on the spectrum: `lo ≤ λ₁` and `λ_m ≤ hi`, from the discs
+# `αⱼ ± (|βⱼ₋₁| + |βⱼ|)`. `reduce` runs over a host-length collection and the `j` comparisons are
+# on the loop index, so nothing here branches on a value.
+function _gershgorin_bounds(α::AbstractVector, β::AbstractVector)
     m = length(α)
     z = zero(α[1])
-    return reduce(
-        max,
-        abs(α[j]) + (j > 1 ? abs(β[j - 1]) : z) + (j < m ? abs(β[j]) : z) for j in 1:m
-    )
+    radius(j) = (j > 1 ? abs(β[j - 1]) : z) + (j < m ? abs(β[j]) : z)
+    return reduce(min, α[j] - radius(j) for j in 1:m),
+        reduce(max, α[j] + radius(j) for j in 1:m)
 end
 
 # Hold a Rayleigh-quotient shift strictly below the eigenvalue it converges onto. Without it the
@@ -457,26 +470,47 @@ function _ritz_eigen(alg::TracedRitz, α::AbstractVector, β::AbstractVector)
     length(α) == 1 && return α[1], _first_unit(α)
     T = _tridiagonal(α, β)
     Id = _identity_like(α)
+    lo, hi = _gershgorin_bounds(α, β)
 
-    # Imaginary-time projection. `exp(-βT)` with `β‖T‖` large suppresses every eigenvector but the
-    # lowest, and the Gershgorin radius makes `β‖T‖` a known host constant whatever the scale of
-    # H. One exponential, then a few matrix-vector applications — the exponential is the same
-    # primitive the TDVP path uses, so this costs no extra machinery.
+    # Isolate the lowest eigenvector with a polynomial filter. `B = I + (hi·I - T)/(hi - lo)` is
+    # positive definite with its *largest* eigenvalue at λ₁, so squaring it `k` times raises it to
+    # the power 2ᵏ and the lowest eigenvector wins by `((hi-λ₁)/(hi-λ₂))^{2ᵏ}` — a separation
+    # exponential in the number of multiplies, where a power iteration would need 2ᵏ of them.
     #
-    # A shifted inverse iteration would be the obvious alternative and is *wrong* here: the only
-    # shift available a priori is a Gershgorin lower bound, which sits a full spectral radius
-    # below λ_min, and from there `(T - σI)⁻¹` barely separates the spectrum. Rayleigh-quotient
-    # iteration started from that lands on whichever eigenvalue happens to be nearest, not the
-    # lowest — measured at the wrong eigenvalue on a random Hermitian matrix.
-    M = _expm_pade((-alg.projection / _gershgorin_radius(α, β)) .* T, Id, alg.squarings)
-    w = _first_unit(α)
-    for _ in 1:3
-        y = M * w
-        w = y ./ _floor_norm(_norm2(y))
+    # Three details are load-bearing:
+    #
+    # * **Renormalising after every squaring** is what makes a *fixed* number of steps safe. The
+    #   eigenvalues are raised to 2ᵏ ≈ 10⁷, so without it the whole matrix would overflow or
+    #   underflow depending on where the spectrum sits, and the answer would depend on a scale
+    #   nobody controls. Dividing by a norm changes no ratio, and `_norm2` is a reduction rather
+    #   than a branch. Over-filtering is then free: once the unwanted components fall below
+    #   roundoff they stay there, so `filtersteps` may be set for the worst case.
+    # * **Shifting by `hi + (hi - lo)` rather than by `hi`** — the `Id .+` — keeps `B ≻ 0` even
+    #   when the Gershgorin interval degenerates to a point, which is exactly the case of a null
+    #   effective operator. There `B` is the identity, the filter is a no-op, and the eigenpair
+    #   comes out as `(0, e₁)` instead of `0/0`. It costs a factor of at most two in contrast,
+    #   i.e. one extra squaring.
+    # * `hi` and `lo` are Gershgorin bounds rather than the true extremes, so the filter's
+    #   strength is set by `(λ₂ - λ₁)` measured against the *width of the discs*. That is the
+    #   quantity `filtersteps` has to cover.
+    #
+    # An imaginary-time projection `exp(-βT)` was the previous route and is strictly worse: its
+    # β is limited by the exponential's dynamic range, so on a spectrum whose gap is small next
+    # to the Gershgorin width it under-separates and the polish below then converges onto the
+    # *second* eigenvalue. Measured that way on 7 of 4000 random Hermitian matrices, the worst 8.7%
+    # above the true minimum — a variational method silently returning an excited state. A shifted
+    # inverse iteration is worse still: the only shift available a priori is `lo`, a full spectral
+    # radius below λ_min, and from there `(T - σI)⁻¹` barely separates anything.
+    B = Id .+ (hi .* Id .- T) ./ _floor_norm(hi - lo)
+    for _ in 1:(alg.filtersteps)
+        B = B * B
+        B = B ./ _floor_norm(_norm2(B))
     end
+    w = B * _first_unit(α)
+    w = w ./ _floor_norm(_norm2(w))
 
     # Polish. Rayleigh-quotient iteration converges cubically once it is in the right basin, which
-    # the projection has guaranteed.
+    # the filter has guaranteed.
     for _ in 1:(alg.iterations)
         y = (T .- _guard_shift(real(dot(w, T * w))) .* Id) \ w
         w = y ./ _floor_norm(_norm2(y))

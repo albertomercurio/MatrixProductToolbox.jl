@@ -150,6 +150,8 @@ effective operator and truncating on the way out.
 ``-\sum_i \hat{\sigma}^x_i`` as a bond-dimension-2 MPO, whose ground energy is exactly `-L`:
 
 ```jldoctest
+julia> using Random
+
 julia> W = zeros(ComplexF64, 2, 2, 2, 2);
 
 julia> W[1, :, :, 1] = W[2, :, :, 2] = [1 0; 0 1]; W[1, :, :, 2] = -[0 1; 1 0];
