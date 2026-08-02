@@ -41,4 +41,12 @@ include("observables.jl")
 include("apply.jl")
 include("dense.jl")
 
+## Local solvers and the environment cache the sweeping algorithms are built from
+include("krylov.jl")
+include("environments.jl")
+
+## Algorithms
+include("dmrg.jl")
+include("tdvp.jl")
+
 end

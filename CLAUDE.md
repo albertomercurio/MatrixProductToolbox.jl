@@ -5,8 +5,8 @@ order: **simplicity** (few concepts, a tiny kernel set), **flexibility** (every 
 type you can extend), and **platform agnosticism** (one code path for `Array`, `CuArray` and
 Reactant/XLA).
 
-Current status: the foundation layer. DMRG and TDVP are **not** implemented — see the roadmap
-at the end. The conventions and kernels they need are fixed and tested.
+Current status: the foundation layer plus two-site **DMRG** and **TDVP**. Both run on `Array`,
+`CuArray` and Reactant/XLA; see the roadmap at the end for what is still deferred.
 
 ## Standing instruction
 
@@ -82,7 +82,7 @@ their own `AbstractMatrixProduct` subtype, not as another flag here.
 
 ## Architecture
 
-Ten source files, each mapping to one concept.
+Fourteen source files, each mapping to one concept.
 
 | File | Role |
 |:---|:---|
@@ -95,6 +95,10 @@ Ten source files, each mapping to one concept.
 | `src/observables.jl` | `dot`, `norm`, `expect`, entanglement |
 | `src/apply.jl` | `apply(H, ψ)`, scalar arithmetic |
 | `src/dense.jl` | conversion to the full dense array |
+| `src/krylov.jl` | local solvers: Lanczos eigen / exponential, and the Ritz policies |
+| `src/environments.jl` | the environment cache, `leftenv` / `rightenv` |
+| `src/dmrg.jl` | two-site DMRG |
+| `src/tdvp.jl` | two-site TDVP, real and imaginary time |
 
 `export` statements live at the top of the file where each symbol is defined, grouped — never
 one central list.
@@ -120,9 +124,12 @@ Two rules for this file:
   `tensortrace!`, whose `BaseCopy` implementation — the one Reactant routes to — unrolls a
   Julia loop over diagonal slices at trace time.
 
-The two `apply_effective` kernels are unused by the current public API. They exist so that the
-effective-operator conventions DMRG and TDVP need are fixed and tested now; `test/kernels.jl`
-validates them against `expect`.
+The two `apply_effective` kernels are what DMRG and TDVP apply at every bond; `test/kernels.jl`
+validates them against `expect` independently of those algorithms.
+
+Merging and splitting a two-site block are **not** kernels. They are a reshape and one matrix
+multiply — the same shape of operation as `_absorb_left`/`_absorb_right` — so `_merge_sites` and
+`_split_twosite!` live in `canonical.jl` and the count above stays at six.
 
 ### Two idioms that keep the package device-safe
 
@@ -272,8 +279,8 @@ Both were found by running `GROUP=Reactant`, and both are invisible on the CPU:
   inside.
 - **Never branch on a value, only on a shape.** `if total > 0` compiles to a traced boolean and
   cannot drive Julia control flow. `if k ≥ length(s)` is fine, because `k` and `length(s)` come
-  from shapes. `_discarded_weight` is written this way deliberately; the comment there explains
-  the trade-off it accepts.
+  from shapes. `_discarded_weight` in `factorizations.jl` is written this way deliberately; the
+  comment there explains the trade-off it accepts.
 - **`count` on a traced array can exhaust the compiler.** Not a clean error — LLVM ran out of
   memory even with a 24 GB cap. This is why `_truncation_rank(::Truncation, …)` checks that a
   comparison yields a host `Bool` *before* reaching its reduction, rather than validating the
@@ -314,7 +321,7 @@ Both were found by running `GROUP=Reactant`, and both are invisible on the CPU:
 ## Working on this repo
 
 ```bash
-make test                 # Core group: contractions, gauge, observables, CPU probes
+make test                 # Core group: contractions, gauge, observables, algorithms, CPU probes
 GROUP=Core        make test
 GROUP=Code-Quality make test   # Aqua + JET; memory hungry, keep it in its own process
 GROUP=CUDA        make test    # test/cuda/,     own sub-environment, needs a GPU
@@ -347,19 +354,54 @@ index or conjugation error to hide.
 CUDA and Reactant live in sub-environments under `test/` precisely so they never enter this
 package's dependency graph. Reactant runs on CPU, so unlike CUDA it is usable in CI.
 
+## Algorithms
+
+Two-site DMRG and TDVP, sharing the environment cache, the `apply_effective` kernels and the
+two-site merge/split. See the [Algorithms](docs/src/manual/algorithms.md) manual page; three
+things about them belong here.
+
+**The local solvers are policies, and the traceability boundary is the *projected* solve.**
+Lanczos builds an orthonormal Krylov basis (traceable once `m` is fixed) and then solves a small
+`m × m` problem (not traceable: Reactant wraps no `eigen`, and `LinearAlgebra.exp` of a matrix
+picks its squaring count from `opnorm`). So only that second half is a policy — `DenseRitz` calls
+LAPACK, `TracedRitz` gets the same two answers from an imaginary-time projection plus
+Rayleigh-quotient iteration, and a fixed-squaring Padé. Running **one algorithm everywhere** is
+what lets `backend_testset` compare a traced sweep against the CPU answer at floating-point
+tolerance rather than a loose one. Do not replace `TracedRitz` with a different algorithm.
+
+**Reorthogonalize twice.** `_lanczos` runs modified Gram-Schmidt against the whole basis *twice*,
+and this is load-bearing rather than cautious. DMRG hands the solver a block that is already
+nearly the local eigenvector, so the first residual is tiny — β₁ ≈ 1e-5 against ‖H_eff‖ ≈ 20 —
+and dividing by it amplifies whatever one pass left behind. Measured with a single pass:
+`‖VᴴV - I‖ = 1.4`, and a Ritz value of −29.8 against a true minimum of −21.8, i.e. **below** it.
+`test/krylov.jl` has the regression test; the ordinary random-start tests never trigger it.
+
+**Tolerances are relative to the norm of the map.** `f` carries the units of an energy, so an
+absolute threshold is meaningless: at ‖f‖ ≈ 20 a converged block leaves a residual around 2e-12,
+so a fixed 1e-12 never fires and every solve runs the full `krylovdim`. That alone was a 1.3×
+cost on a 20-site chain at χ = 128.
+
+**DMRG is contraction-bound, and that still is not enough for the GPU.** Measured at L = 20,
+krylovdim = 12, `Float64`, RTX 4090: the effective-operator applications are 69% of a bond's CPU
+time at χ = 256, and the GPU delivers 4.9× on exactly that half — but loses overall (0.68×)
+because one 512×512 SVD costs 243 ms there against 30 ms on the CPU. Batching the factorizations
+across bonds is the fix, and is roadmap item 2. XLA has no such problem and wins ~1.9× at χ = 256,
+but compiles for 90–135 s per shape signature and unrolls the whole sweep at trace time — at
+L = 40 the module reaches ~400k lines and the compiler fails outright with `Could not find unique
+name for *_broadcast_scalar`. `@trace for` is the way out and is not wired up.
+
 ## Roadmap
 
 Deliberately deferred, in rough order:
 
-1. **DMRG** — needs an environment cache (`leftenv`/`rightenv` with validity bookkeeping) and an
-   `EffectiveOperator` wrapper around the `apply_effective` kernels, exposed as a callable
-   linear map so any Krylov solver consumes it. Reactant has no `eigen`, so the local
-   eigensolver must be a hand-written Lanczos over matvecs.
-2. **TDVP** — same environments, exponentiation instead of diagonalization.
-3. **General Hamiltonian-MPO builders** from sums of local terms. Until then, build MPOs by hand
+1. **General Hamiltonian-MPO builders** from sums of local terms. Until then, build MPOs by hand
    — see `tfim_mpo` in `test/testutils.jl` and the documentation.
-4. MPS addition / direct sum; needed by variational and Krylov methods.
-5. **Clifford-Augmented MPS (CAMPS)**: `struct CliffordMPS <: AbstractMatrixProduct{1}` holding a
+2. **Batched factorizations across bonds** — the other half of the GPU fix, and the only thing
+   standing between DMRG and a real accelerator win.
+3. MPS addition / direct sum; needed by variational and Krylov methods.
+4. **Clifford-Augmented MPS (CAMPS)**: `struct CliffordMPS <: AbstractMatrixProduct{1}` holding a
    tableau plus an `MPS`. This is why `src/abstract.jl` documents a five-method interface and
    why every algorithm is written against it rather than against the concrete type.
-6. Infinite MPS; shape-keyed thunk caching for Reactant.
+5. Infinite MPS; `@trace for` and shape-keyed thunk caching for Reactant.
+6. Open-system TDVP: a Lindbladian needs a `MatrixProduct{4}` generator and a non-Hermitian
+   Arnoldi exponential, so it is a genuine extension rather than a keyword.

@@ -40,13 +40,22 @@ include(joinpath(@__DIR__, "..", "testutils.jl"))
         # Eager backend: the runner is just application, exactly as for `Array`.
         backend_testset("CuArray", ψ -> adapt(CuArray, ψ), (f, a, b, c) -> f(a, b, c))
 
+        # The sweeping algorithms. Unlike Reactant, `CuArray` needs no traceable solver — its
+        # Lanczos coefficients are host numbers, so `DenseRitz` runs — and its complex `svd` is
+        # correct, so real-time TDVP works too. The probes still specify `TracedRitz`, which is
+        # the point: it is the *same* projected problem, so it must give the same answer here.
+        backend_testset(
+            "CuArray (algorithms)", ψ -> adapt(CuArray, ψ), (f, a, b, c) -> f(a, b, c);
+            probes = vcat(ALGORITHM_PROBES, COMPLEX_ALGORITHM_PROBES)
+        )
+
         @testset "no scalar indexing" begin
             # `allowscalar(false)` turns any accidental host round-trip into an error, which is
             # the property the `sum(E)` and `fill!(similar(...))` idioms exist to guarantee.
             CUDA.allowscalar(false)
             H_cpu, ψ_cpu, φ_cpu = backend_inputs()
             H, ψ, φ = adapt(CuArray, H_cpu), adapt(CuArray, ψ_cpu), adapt(CuArray, φ_cpu)
-            for (label, probe) in BACKEND_PROBES
+            for (label, probe) in vcat(BACKEND_PROBES, ALGORITHM_PROBES, COMPLEX_ALGORITHM_PROBES)
                 @testset "$label" begin
                     @test probe(H, ψ, φ) ≈ probe(H_cpu, ψ_cpu, φ_cpu)
                 end

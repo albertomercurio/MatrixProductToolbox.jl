@@ -36,6 +36,33 @@ _host(x::Number) = x
 
 jit_run(f, a, b, c) = _host(@jit f(a, b, c))
 
+# Relative reconstruction error of an SVD. Written with the package's own broadcast idiom rather
+# than `Diagonal`, so that it traces the same way the factorizations do.
+function _svd_residual(A)
+    F = svd(A)
+    return norm(F.U .* transpose(F.S) * F.Vt .- A) / norm(A)
+end
+
+# Whether Reactant's *complex* `svd` reconstructs its input on this backend.
+#
+# This is deliberately a runtime capability probe and **not** a test of which device is in use.
+# The two backends fail differently: the CPU one cannot compile `zgesdd_` at all (`'llvm.call' op
+# operand type mismatch for operand 13`, `LWORK` passed by value instead of by reference), while
+# the GPU one throws nothing and silently returns `Vᵀ` where `Vᴴ` is wanted — `svdvals` is exact
+# and both factors are valid isometries, so only the reconstruction identity catches it. Gating on
+# "is this a GPU?" would run the complex tests on precisely the backend that lies.
+#
+# It also turns green by itself once the upstream bug is fixed, at which point the `@test_skip`
+# below becomes a real test with no edit here.
+function complex_svd_reconstructs()
+    A = ComplexF64[2 1 + im 0 0; 1 - im 3 im 0; 0 -im 2 1; 0 0 1 4]
+    return try
+        _host(@jit _svd_residual(Reactant.to_rarray(A))) < 1.0e-10
+    catch
+        false
+    end
+end
+
 @testset "Reactant / XLA" verbose = true begin
     Reactant.set_default_backend("cpu")
 
@@ -187,5 +214,76 @@ jit_run(f, a, b, c) = _host(@jit f(a, b, c))
         # for its factorization, the SVD path must not, and vice versa. This is the assertion
         # that the `factorization` keyword actually reaches the backend.
         @test !occursin("geqrf", sprint(show, @code_hlo svd_sweep(H, ψ)))
+    end
+
+    #=
+    The sweeping algorithms.
+
+    `ALGORITHM_PROBES` uses `FixedTruncation` and `TracedRitz` together, which is exactly what
+    makes a whole sweep traceable: bond dimensions follow from shapes alone, the Lanczos runs a
+    fixed number of steps, and the projected solve never branches on a value. `dmrg` and `tdvp`
+    additionally switch off their own sweep-to-sweep convergence tests when handed a traceable
+    solver, since those are comparisons of energies and so branches of the same kind.
+
+    Because `TracedRitz` solves the *same* projected problem as the default rather than running a
+    different algorithm, these compare against the CPU answer at the ordinary tolerance — which
+    is the whole reason the policy was written that way.
+    =#
+    @testset "algorithms (Float64)" begin
+        backend_testset(
+            "ConcreteRArray", Reactant.to_rarray, jit_run;
+            probes = ALGORITHM_PROBES, T = Float64
+        )
+    end
+
+    @testset "`DenseRitz` refuses to trace" begin
+        # The failure to guard against is a silent fall-back, so this asserts on the message: the
+        # guard exists to name the way out, not merely to stop.
+        dense_ritz(H, ψ, φ) = dmrg(
+            H, ψ; nsweeps = 1, trunc = FixedTruncation(ALGORITHM_CHI), verbose = false,
+            solver = LanczosEigen(; krylovdim = ALGORITHM_KRYLOVDIM, ritz = DenseRitz())
+        ).energy
+        err = try
+            jit_run(dense_ritz, H, ψ, ψ)
+            nothing
+        catch e
+            e
+        end
+        @test err !== nothing
+        @test occursin("TracedRitz", sprint(showerror, err))
+    end
+
+    @testset "a DMRG sweep lowers to HLO" begin
+        # The two things a sweep must reach: `dot_general` for the effective-operator
+        # applications, and the LAPACK SVD for the two-site splits.
+        sweep(H, ψ) = dmrg(
+            H, ψ; nsweeps = 1, trunc = FixedTruncation(ALGORITHM_CHI), verbose = false,
+            solver = LanczosEigen(; krylovdim = ALGORITHM_KRYLOVDIM, ritz = TracedRitz())
+        ).energy
+        hlo = sprint(show, @code_hlo sweep(H, ψ))
+        @test occursin("dot_general", hlo)
+        @test occursin("gesdd", hlo) || occursin("gesvd", hlo) || occursin("svd", hlo)
+    end
+
+    @testset "real-time TDVP needs a complex SVD" begin
+        # Two-site TDVP has to truncate, and truncation means an SVD, so real time in `ComplexF64`
+        # is only possible where Reactant's complex SVD works. It currently does not — on either
+        # backend — so this is probed rather than assumed, and skips with a message instead of
+        # failing. See `complex_svd_reconstructs` above for why the probe is a reconstruction
+        # identity and not a device-type test.
+        if complex_svd_reconstructs()
+            backend_testset(
+                "ConcreteRArray", Reactant.to_rarray, jit_run;
+                probes = COMPLEX_ALGORITHM_PROBES, T = ComplexF64
+            )
+        else
+            @info """
+            Skipping complex-time TDVP: Reactant's complex `svd` does not reconstruct its input on
+            this backend. On CPU it fails to compile `zgesdd_`; on GPU it returns `Vᵀ` in place of
+            `Vᴴ` and throws nothing. Imaginary-time TDVP and `Float64` DMRG are unaffected, and
+            this test starts running by itself once the upstream bug is fixed.
+            """
+            @test_skip complex_svd_reconstructs()
+        end
     end
 end

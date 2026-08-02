@@ -50,6 +50,72 @@ function _absorb_right(t::AbstractArray, L::AbstractMatrix)
     return reshape(reshape(t, :, size(t, n)) * L, front..., size(L, 2))
 end
 
+#=
+Two-site blocks, for DMRG and TDVP.
+
+Merging and splitting are the same shape of operation as the two absorptions above -- a reshape
+and one matrix multiply -- which is why they live here rather than in `kernels.jl`. The index
+order `[l, p…, r]` makes every reshape below contiguous, so no `permutedims` appears here either,
+and `kernels.jl` stays at the six contractions it claims.
+=#
+
+# Θ[l, p…, q…, r] = Σ_m A[l, p…, m] * B[m, q…, r].
+function _merge_sites(A::AbstractArray, B::AbstractArray)
+    front = size(A)[1:(ndims(A) - 1)]
+    back = size(B)[2:end]
+    M = reshape(A, :, size(A, ndims(A))) * reshape(B, size(B, 1), :)
+    return reshape(M, front..., back...)
+end
+
+# The matricization a two-site block is split across: left bond and the first site's physical
+# legs against the second site's physical legs and the right bond.
+function _twosite_matrix(Θ::AbstractArray, ::Val{N}) where {N}
+    dims1 = ntuple(k -> size(Θ, k + 1), Val(N))
+    return reshape(Θ, size(Θ, 1) * prod(dims1), :)
+end
+
+# Split a two-site block back onto sites `i` and `i+1`, in place, returning the relative discarded
+# weight. `direction` says which way the sweep is moving: the orthogonality centre is left on site
+# `i+1` for `Val(:right)` and on site `i` for `Val(:left)`, so the site the sweep is leaving behind
+# is the one that becomes orthogonal.
+function _split_twosite!(
+        ψ::AbstractMatrixProduct{N}, i::Integer, Θ::AbstractArray,
+        trunc::AbstractTruncation, alg::AbstractFactorization, ::Val{:right}
+    ) where {N}
+    χl, χr = size(Θ, 1), size(Θ, ndims(Θ))
+    dims1 = ntuple(k -> size(Θ, k + 1), Val(N))
+    dims2 = ntuple(k -> size(Θ, k + 1 + N), Val(N))
+    Q, R, ε = _factorize_left(alg, trunc, _twosite_matrix(Θ, Val(N)))
+    setsite!(ψ, i, reshape(Q, χl, dims1..., size(Q, 2)))
+    setsite!(ψ, i + 1, reshape(R, size(R, 1), dims2..., χr))
+    setcenter!(ψ, Int(i) + 1)
+    return ε
+end
+
+function _split_twosite!(
+        ψ::AbstractMatrixProduct{N}, i::Integer, Θ::AbstractArray,
+        trunc::AbstractTruncation, alg::AbstractFactorization, ::Val{:left}
+    ) where {N}
+    χl, χr = size(Θ, 1), size(Θ, ndims(Θ))
+    dims1 = ntuple(k -> size(Θ, k + 1), Val(N))
+    dims2 = ntuple(k -> size(Θ, k + 1 + N), Val(N))
+    L, Q, ε = _factorize_right(alg, trunc, _twosite_matrix(Θ, Val(N)))
+    setsite!(ψ, i, reshape(L, χl, dims1..., size(L, 2)))
+    setsite!(ψ, i + 1, reshape(Q, size(Q, 1), dims2..., χr))
+    setcenter!(ψ, Int(i))
+    return ε
+end
+
+# Scale the orthogonality centre to unit norm, without the zero-norm check `normalize!` makes.
+# That check is `iszero(n) && throw(…)` — a branch on a value, which a traced backend cannot
+# express — so the sweeping algorithms, which renormalise after every truncation, divide by a
+# floored norm instead. Requires a single-site centre, which is what a finished sweep leaves.
+function _normalize_center!(ψ::AbstractMatrixProduct)
+    c = only(center(ψ))
+    setsite!(ψ, c, ψ[c] ./ _floor_norm(_norm2(ψ[c])))
+    return ψ
+end
+
 @doc raw"""
     canonicalize!(ψ, c = 1; trunc = NoTruncation(), factorization = SVDFactorization())
 

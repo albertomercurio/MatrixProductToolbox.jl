@@ -12,5 +12,12 @@ The other backends run the very same list:
 =#
 
 backend_testset("Array (identity adaptor)", identity, (f, a, b, c) -> f(a, b, c))
+backend_testset(
+    "Array (algorithms)", identity, (f, a, b, c) -> f(a, b, c); probes = ALGORITHM_PROBES
+)
+backend_testset(
+    "Array (complex algorithms)", identity, (f, a, b, c) -> f(a, b, c);
+    probes = COMPLEX_ALGORITHM_PROBES
+)
 
 backend_testset("Array (via Adapt)", ψ -> adapt(Array, ψ), (f, a, b, c) -> f(a, b, c))

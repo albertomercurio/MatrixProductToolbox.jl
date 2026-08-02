@@ -165,6 +165,13 @@ struct QRFactorization <: AbstractFactorization end
 
 _supports_truncation(::QRFactorization) = false
 
+# The one SVD behind every method below, public and tracked alike. Factoring it out is what lets
+# `_factorize_left`/`_factorize_right` report a discarded weight without decomposing twice.
+function _svd_split(trunc::AbstractTruncation, M::AbstractMatrix)
+    F = svd(M)
+    return F.U, F.S, F.Vt, _truncation_rank(trunc, F.S)
+end
+
 @doc raw"""
     factorize_left(alg, trunc, M)
 
@@ -183,11 +190,8 @@ into the next site.
 - `R`: `k × n`.
 """
 function factorize_left(::SVDFactorization, trunc::AbstractTruncation, M::AbstractMatrix)
-    F = svd(M)
-    k = _truncation_rank(trunc, F.S)
-    Q = F.U[:, 1:k]
-    R = F.S[1:k] .* F.Vt[1:k, :]
-    return Q, R
+    U, S, Vt, k = _svd_split(trunc, M)
+    return U[:, 1:k], S[1:k] .* Vt[1:k, :]
 end
 
 @doc raw"""
@@ -208,12 +212,52 @@ into the previous site.
 - `Q`: `k × n` with `Q * Q' ≈ I`.
 """
 function factorize_right(::SVDFactorization, trunc::AbstractTruncation, M::AbstractMatrix)
-    F = svd(M)
-    k = _truncation_rank(trunc, F.S)
-    L = F.U[:, 1:k] .* transpose(F.S[1:k])
-    Q = F.Vt[1:k, :]
-    return L, Q
+    U, S, Vt, k = _svd_split(trunc, M)
+    return U[:, 1:k] .* transpose(S[1:k]), Vt[1:k, :]
 end
+
+#=
+Truncation-error reporting.
+
+An earlier design had `factorize_left`/`factorize_right` return the discarded weight alongside
+the factors, and it was removed because nothing consumed it while costing a reduction on every
+bond of every sweep. DMRG and TDVP do consume it, so it comes back — but as a separate internal
+entry point, so that only the callers who want it pay for it and the public two-tuple return
+stays as it was.
+=#
+
+# The relative discarded weight ε = Σ_{i>k} σᵢ² / Σᵢ σᵢ².
+#
+# `k ≥ length(s)` is a comparison of *shapes*, so it yields a host `Bool` on every backend and
+# can drive Julia control flow; the arithmetic that follows never branches on a value. Writing it
+# as `1 - kept/total` rather than an early `return zero(...)` keeps one return type: under
+# tracing the element type of `s` is a traced number, for which `zero(real(eltype(s)))` is not
+# available.
+function _discarded_weight(s::AbstractVector, k::Integer)
+    w = abs2.(s)
+    total = sum(w)
+    kept = k ≥ length(s) ? total : sum(view(w, 1:k))
+    return one(total) - kept / total
+end
+
+# `factorize_left`, also reporting the relative discarded weight.
+function _factorize_left(::SVDFactorization, trunc::AbstractTruncation, M::AbstractMatrix)
+    U, S, Vt, k = _svd_split(trunc, M)
+    return U[:, 1:k], S[1:k] .* Vt[1:k, :], _discarded_weight(S, k)
+end
+
+# `factorize_right`, also reporting the relative discarded weight.
+function _factorize_right(::SVDFactorization, trunc::AbstractTruncation, M::AbstractMatrix)
+    U, S, Vt, k = _svd_split(trunc, M)
+    return U[:, 1:k] .* transpose(S[1:k]), Vt[1:k, :], _discarded_weight(S, k)
+end
+
+# A factorization that cannot truncate discards nothing, exactly.
+_factorize_left(alg::AbstractFactorization, trunc::AbstractTruncation, M::AbstractMatrix) =
+    (factorize_left(alg, trunc, M)..., 0.0)
+
+_factorize_right(alg::AbstractFactorization, trunc::AbstractTruncation, M::AbstractMatrix) =
+    (factorize_right(alg, trunc, M)..., 0.0)
 
 # A QR keeps the full rank `k = min(m, n)`, so the only policies it can honour are the ones that
 # ask for exactly that. Deciding this from `k` alone -- never from a value -- is what keeps the
