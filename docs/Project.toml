@@ -6,4 +6,5 @@ MatrixProductToolbox = "d2c4df42-1602-4f1e-b7a4-65c48eba2396"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
 [compat]
+Adapt = "4.7.4"
 Documenter = "1"
